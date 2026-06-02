@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Thumb.png" alt="Patient Monitor Simulator" width="640">
+</p>
+
 # Patient Monitor Simulator
 
 A browser-based patient monitor simulator designed for clinical simulation and training. Displays live ECG, SpO2, and respiratory waveforms alongside vital sign numerics — all controllable in real time from a second device such as a phone or tablet.
