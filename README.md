@@ -93,3 +93,11 @@ Refreshing the monitor page generates a new session. The controller QR code will
 ## License
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+### Third-party dependencies
+
+This project makes use of the following third-party libraries and services, each with their own license terms:
+
+- **[PeerJS](https://peerjs.com/)** — peer-to-peer communication. MIT License.
+- **[NoSleep.js](https://github.com/richtr/NoSleep.js)** — prevents display sleep on mobile devices. MIT License.
+- **[QR Server](https://goqr.me/api/)** — external API used to generate the controller QR code.
