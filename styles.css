@@ -83,6 +83,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  cursor: none;
 }
 
 .monitor-stage:fullscreen .monitor-grid-wrap {
