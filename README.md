@@ -72,6 +72,16 @@ Each vital sign has a row with:
 
 Changes take effect on the monitor screen immediately.
 
+### Hold
+
+The **Hold** button at the bottom of the Observations section lets you prepare several changes before sending them to the monitor.
+
+1. Tap **Hold** — the button changes to **Release** and any adjustments you make are queued but not yet sent.
+2. Adjust as many observations as needed.
+3. Tap **Release** — all queued changes are sent to the monitor at once and ramp in smoothly over 10 seconds.
+
+This is useful when you want to trigger a significant clinical change (for example dropping SpO2, heart rate, and blood pressure together) at a moment of your choosing during a scenario.
+
 ---
 
 ## Refreshing / Resetting

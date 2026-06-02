@@ -36,6 +36,8 @@ const initialMonitorState = {
 
 let cur = {...initialMonitorState};
 let tgt = {...initialMonitorState};
+let rampEndTime = 0;
+const RAMP_DURATION = 10;
 const metricEnabled = {
   hr: true,
   spo2: true,
@@ -325,12 +327,15 @@ function monitorFrame(ts){
   const dt = Math.min((ts - lastT) / 1000, .05);
   lastT = ts;
   resizeWaveDisplays();
-  cur.hr = smoothValue(cur.hr, tgt.hr, 3.8, dt);
-  cur.spo2 = smoothValue(cur.spo2, tgt.spo2, 2.2, dt);
-  cur.rr = smoothValue(cur.rr, tgt.rr, 3.2, dt);
-  cur.sbp = smoothValue(cur.sbp, tgt.sbp, 2.4, dt);
-  cur.dbp = smoothValue(cur.dbp, tgt.dbp, 2.4, dt);
-  cur.temp = smoothValue(cur.temp, tgt.temp, 0.8, dt);
+  const nowSec = ts / 1000;
+  const rampActive = nowSec < rampEndTime;
+  const rampSpeed = rampActive ? (1 / RAMP_DURATION) * 1.5 : null;
+  cur.hr = smoothValue(cur.hr, tgt.hr, rampSpeed ?? 3.8, dt);
+  cur.spo2 = smoothValue(cur.spo2, tgt.spo2, rampSpeed ?? 2.2, dt);
+  cur.rr = smoothValue(cur.rr, tgt.rr, rampSpeed ?? 3.2, dt);
+  cur.sbp = smoothValue(cur.sbp, tgt.sbp, rampSpeed ?? 2.4, dt);
+  cur.dbp = smoothValue(cur.dbp, tgt.dbp, rampSpeed ?? 2.4, dt);
+  cur.temp = smoothValue(cur.temp, tgt.temp, rampSpeed ?? 0.8, dt);
   cur.rhythm = tgt.rhythm;
   updateNumerics();
 
@@ -385,7 +390,12 @@ function setupMonitor(){
       if(msg.type === 'rhythm'){
         tgt.rhythm = msg.value;
       } else if(msg.type === 'obs'){
-        tgt[msg.key] = clampObsValue(msg.key, (tgt[msg.key] || 0) + msg.delta);
+        tgt[msg.key] = clampObsValue(msg.key, msg.value);
+      } else if(msg.type === 'ramp'){
+        Object.keys(msg.values).forEach(k => {
+          tgt[k] = clampObsValue(k, msg.values[k]);
+        });
+        rampEndTime = performance.now() / 1000 + RAMP_DURATION;
       } else if(msg.type === 'metric'){
         getMetricGroupKeys(msg.key).forEach(k => {
           metricEnabled[k] = !!msg.enabled;
@@ -408,6 +418,8 @@ let ctrlState = {
 };
 let ctrlRhythm = 'NSR';
 let wakeLockSentinel = null;
+let holdActive = false;
+let heldState = null;
 
 const obsConfig = [
   {key:'hr',   label:'HR',   unit:'bpm', color:'#00ff41', step:1,  min:0,   max:300},
@@ -483,10 +495,15 @@ function formatVal(key, v){
 
 function nudge(key, delta){
   const nextValue = clampObsValue(key, ctrlState[key] + delta);
-  const appliedDelta = nextValue - ctrlState[key];
   ctrlState[key] = nextValue;
   syncControllerField(key);
-  if(ctrlConn && appliedDelta) ctrlConn.send({type:'obs', key, delta: appliedDelta});
+  if(holdActive){
+    heldState[key] = nextValue;
+    syncHoldIndicators();
+  } else {
+    if(ctrlConn) ctrlConn.send({type:'obs', key, value: nextValue});
+    flashInput(key);
+  }
 }
 
 function syncControllerField(key){
@@ -504,10 +521,15 @@ function applyManualInput(key, rawValue){
     return;
   }
   const nextValue = clampObsValue(key, parsed);
-  const appliedDelta = nextValue - ctrlState[key];
   ctrlState[key] = nextValue;
   syncControllerField(key);
-  if(ctrlConn && appliedDelta) ctrlConn.send({type:'obs', key, delta: appliedDelta});
+  if(holdActive){
+    heldState[key] = nextValue;
+    syncHoldIndicators();
+  } else {
+    if(ctrlConn) ctrlConn.send({type:'obs', key, value: nextValue});
+    flashInput(key);
+  }
 }
 
 function syncMetricControls(key){
@@ -534,6 +556,48 @@ function toggleMetric(key){
     syncMetricControls(k);
     if(ctrlConn) ctrlConn.send({type:'metric', key: k, enabled: nextEnabled});
   });
+}
+
+function flashInput(key){
+  const input = document.getElementById('cv-' + key);
+  if(!input) return;
+  input.classList.remove('obs-flash');
+  void input.offsetWidth;
+  input.classList.add('obs-flash');
+  input.addEventListener('animationend', () => input.classList.remove('obs-flash'), { once: true });
+}
+
+function syncHoldIndicators(){
+  obsConfig.forEach(o => {
+    const input = document.getElementById('cv-' + o.key);
+    if(!input) return;
+    const staged = holdActive && heldState && heldState[o.key] !== undefined;
+    input.classList.toggle('obs-staged', staged);
+  });
+}
+
+function toggleHold(){
+  holdActive = !holdActive;
+  const btn = document.getElementById('holdBtn');
+  if(holdActive){
+    heldState = {};
+    if(btn){
+      btn.textContent = 'Release';
+      btn.classList.add('hold-active');
+    }
+  } else {
+    if(heldState && ctrlConn){
+      const keys = Object.keys(heldState);
+      ctrlConn.send({type:'ramp', values: {...heldState}, duration: 10});
+      keys.forEach(flashInput);
+    }
+    heldState = null;
+    syncHoldIndicators();
+    if(btn){
+      btn.textContent = 'Hold';
+      btn.classList.remove('hold-active');
+    }
+  }
 }
 
 function setRhythm(rhythm){
@@ -576,6 +640,9 @@ function setupController(){
     rhythmSelect.addEventListener('change', () => setRhythm(rhythmSelect.value));
   }
   buildObsRows();
+
+  const holdBtn = document.getElementById('holdBtn');
+  if(holdBtn) holdBtn.addEventListener('click', toggleHold);
 
   const peer = new Peer({debug:0});
   peer.on('open', () => {
