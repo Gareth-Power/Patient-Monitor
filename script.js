@@ -161,13 +161,12 @@ function ecgSample(phase, s){
 function spo2Sample(phase, s){
   if(!metricEnabled.spo2) return 0;
   if(s.spo2 <= 0 || s.hr <= 0) return (Math.random() - .5) * .05;
-  const p = phase;
   const perfusion = clamp((s.sbp + 2 * s.dbp) / 280, 0.12, 1.1);
   const oxyGain = clamp(s.spo2 / 98, 0.08, 1.02);
-  const rise = Math.pow(Math.sin(Math.PI * smoothStep(0, .32, p)), 1.55);
-  const decay = Math.exp(-Math.max(0, p - .16) * 4.8);
-  const notch = .12 * Math.exp(-Math.pow((p - .46) / .055, 2));
-  const baseline = .02 * Math.sin(Math.PI * p * 2);
+  const rise = Math.pow(Math.sin(Math.PI * smoothStep(0, .32, phase)), 1.55);
+  const decay = Math.exp(-Math.max(0, phase - .16) * 4.8);
+  const notch = .12 * Math.exp(-Math.pow((phase - .46) / .055, 2));
+  const baseline = .02 * Math.sin(Math.PI * phase * 2);
   const y = rise * decay + notch + baseline;
   return y * perfusion * oxyGain + (Math.random() - .5) * .012;
 }
@@ -359,10 +358,6 @@ function monitorFrame(ts){
   requestAnimationFrame(monitorFrame);
 }
 
-function applyState(newState){
-  Object.assign(tgt, newState);
-}
-
 /* MONITOR PEER SETUP */
 function setupMonitor(){
   document.getElementById('monitorView').style.display = 'flex';
@@ -417,7 +412,6 @@ let ctrlState = {
   hr:72, spo2:98, rr:16, temp:36.7, sbp:120, dbp:80
 };
 let ctrlRhythm = 'NSR';
-let wakeLockSentinel = null;
 let holdActive = false;
 let heldState = null;
 
@@ -444,17 +438,12 @@ function clampObsValue(key, value){
   return cfg ? clamp(value, cfg.min, cfg.max) : Math.max(0, value);
 }
 
-async function requestWakeLock(){
-  if(!('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
-  try {
-    wakeLockSentinel = await navigator.wakeLock.request('screen');
-    wakeLockSentinel.addEventListener('release', () => {
-      wakeLockSentinel = null;
-    }, { once: true });
-  } catch (err) {
-    console.warn('Wake lock request failed', err);
-  }
+const noSleep = new NoSleep();
+function enableNoSleep(){
+  noSleep.enable();
 }
+document.addEventListener('click', enableNoSleep, { once: true });
+document.addEventListener('touchstart', enableNoSleep, { once: true });
 
 function buildObsRows(){
   const container = document.getElementById('obsRows');
@@ -588,7 +577,7 @@ function toggleHold(){
   } else {
     if(heldState && ctrlConn){
       const keys = Object.keys(heldState);
-      ctrlConn.send({type:'ramp', values: {...heldState}, duration: 10});
+      ctrlConn.send({type:'ramp', values: {...heldState}});
       keys.forEach(flashInput);
     }
     heldState = null;
@@ -702,9 +691,3 @@ if(!isController){
   }
 }
 
-document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState === 'visible' && !wakeLockSentinel){
-    requestWakeLock();
-  }
-});
-requestWakeLock();
