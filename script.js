@@ -424,6 +424,15 @@ const obsConfig = [
   {key:'temp', label:'Temp', unit:'°C',  color:'#ff8844', step:0.1,min:32,  max:42},
 ];
 
+// Single combined row for SBP+DBP in the controller UI.
+const nibpRowConfig = {
+  sbp: obsConfig.find(o => o.key === 'sbp'),
+  dbp: obsConfig.find(o => o.key === 'dbp'),
+};
+
+// obsConfig entries shown as individual rows (NIBP is handled separately).
+const obsConfigRows = obsConfig.filter(o => o.key !== 'sbp' && o.key !== 'dbp');
+
 function getMetricGroupKeys(key){
   if(key === 'sbp' || key === 'dbp') return ['sbp', 'dbp'];
   return [key];
@@ -446,36 +455,88 @@ function enableNoSleep(){
   noSleep.enable().catch(() => {});
 }
 
+function buildSingleObsRow(o, container){
+  const row = document.createElement('div');
+  row.className = 'obs-row';
+  row.dataset.key = o.key;
+  const val = formatVal(o.key, ctrlState[o.key]);
+  row.innerHTML = `
+    <div class="obs-head">
+      <div class="obs-meta">
+        <div class="obs-name">${o.label}</div>
+        <div class="obs-unit">${o.unit}</div>
+      </div>
+      <button class="obs-toggle ${metricEnabled[o.key] ? 'on' : 'off'}" type="button" data-action="toggle" data-key="${o.key}">${metricEnabled[o.key] ? 'On' : 'Off'}</button>
+    </div>
+    <div class="obs-controls">
+      <button class="obs-btn" type="button" data-action="decrease" data-key="${o.key}">-</button>
+      <input class="obs-input" id="cv-${o.key}" type="number" inputmode="decimal" step="${o.step}" min="${o.min}" max="${o.max}" value="${val}" aria-label="${o.label}">
+      <button class="obs-btn" type="button" data-action="increase" data-key="${o.key}">+</button>
+    </div>`;
+  row.querySelector('[data-action="decrease"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, -o.step); });
+  row.querySelector('[data-action="increase"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, o.step); });
+  row.querySelector('[data-action="toggle"]').addEventListener('click', () => { enableNoSleep(); toggleMetric(o.key); });
+  const input = row.querySelector('.obs-input');
+  input.addEventListener('change', () => applyManualInput(o.key, input.value));
+  input.addEventListener('blur', () => applyManualInput(o.key, input.value));
+  container.appendChild(row);
+  syncMetricControls(o.key);
+}
+
+function buildNibpRow(container){
+  const { sbp, dbp } = nibpRowConfig;
+  const nibpOn = metricEnabled.sbp;
+  const row = document.createElement('div');
+  row.className = 'obs-row obs-row-nibp';
+  row.dataset.key = 'nibp';
+  row.innerHTML = `
+    <div class="obs-head">
+      <div class="obs-meta">
+        <div class="obs-name">NIBP</div>
+        <div class="obs-unit">mmHg</div>
+      </div>
+      <button class="obs-toggle ${nibpOn ? 'on' : 'off'}" type="button" data-action="toggle" data-key="sbp">${nibpOn ? 'On' : 'Off'}</button>
+    </div>
+    <div class="obs-nibp-rows">
+      <div class="obs-nibp-label">SYS</div>
+      <div class="obs-controls">
+        <button class="obs-btn" type="button" data-action="decrease" data-key="sbp">-</button>
+        <input class="obs-input" id="cv-sbp" type="number" inputmode="decimal" step="${sbp.step}" min="${sbp.min}" max="${sbp.max}" value="${formatVal('sbp', ctrlState.sbp)}" aria-label="SBP">
+        <button class="obs-btn" type="button" data-action="increase" data-key="sbp">+</button>
+      </div>
+      <div class="obs-nibp-label">DIA</div>
+      <div class="obs-controls">
+        <button class="obs-btn" type="button" data-action="decrease" data-key="dbp">-</button>
+        <input class="obs-input" id="cv-dbp" type="number" inputmode="decimal" step="${dbp.step}" min="${dbp.min}" max="${dbp.max}" value="${formatVal('dbp', ctrlState.dbp)}" aria-label="DBP">
+        <button class="obs-btn" type="button" data-action="increase" data-key="dbp">+</button>
+      </div>
+    </div>`;
+  row.querySelectorAll('[data-action="decrease"]').forEach(btn =>
+    btn.addEventListener('click', () => { enableNoSleep(); nudge(btn.dataset.key, btn.dataset.key === 'sbp' ? -sbp.step : -dbp.step); }));
+  row.querySelectorAll('[data-action="increase"]').forEach(btn =>
+    btn.addEventListener('click', () => { enableNoSleep(); nudge(btn.dataset.key, btn.dataset.key === 'sbp' ? sbp.step : dbp.step); }));
+  row.querySelector('[data-action="toggle"]').addEventListener('click', () => { enableNoSleep(); toggleMetric('sbp'); });
+  ['sbp','dbp'].forEach(k => {
+    const input = document.getElementById ? row.querySelector(`#cv-${k}`) : null;
+    if(input){
+      input.addEventListener('change', () => applyManualInput(k, input.value));
+      input.addEventListener('blur', () => applyManualInput(k, input.value));
+    }
+  });
+  container.appendChild(row);
+  syncMetricControls('sbp');
+  syncMetricControls('dbp');
+}
+
 function buildObsRows(){
   const container = document.getElementById('obsRows');
   container.innerHTML = '';
-  obsConfig.forEach(o => {
-    const row = document.createElement('div');
-    row.className = 'obs-row';
-    row.dataset.key = o.key;
-    const val = formatVal(o.key, ctrlState[o.key]);
-    row.innerHTML = `
-      <div class="obs-head">
-        <div class="obs-meta">
-          <div class="obs-name">${o.label}</div>
-          <div class="obs-unit">${o.unit}</div>
-        </div>
-        <button class="obs-toggle ${metricEnabled[o.key] ? 'on' : 'off'}" type="button" data-action="toggle" data-key="${o.key}">${metricEnabled[o.key] ? 'On' : 'Off'}</button>
-      </div>
-      <div class="obs-controls">
-        <button class="obs-btn" type="button" data-action="decrease" data-key="${o.key}">-</button>
-        <input class="obs-input" id="cv-${o.key}" type="number" inputmode="decimal" step="${o.step}" min="${o.min}" max="${o.max}" value="${val}" aria-label="${o.label}">
-        <button class="obs-btn" type="button" data-action="increase" data-key="${o.key}">+</button>
-      </div>`;
-    row.querySelector('[data-action="decrease"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, -o.step); });
-    row.querySelector('[data-action="increase"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, o.step); });
-    row.querySelector('[data-action="toggle"]').addEventListener('click', () => { enableNoSleep(); toggleMetric(o.key); });
-    const input = row.querySelector('.obs-input');
-    input.addEventListener('change', () => applyManualInput(o.key, input.value));
-    input.addEventListener('blur', () => applyManualInput(o.key, input.value));
-    container.appendChild(row);
-    syncMetricControls(o.key);
-  });
+  // HR, SpO2
+  obsConfigRows.slice(0, 2).forEach(o => buildSingleObsRow(o, container));
+  // Combined NIBP row
+  buildNibpRow(container);
+  // RR, Temp
+  obsConfigRows.slice(2).forEach(o => buildSingleObsRow(o, container));
 }
 
 function formatVal(key, v){
@@ -527,7 +588,9 @@ function syncMetricControls(key){
   const input = document.getElementById('cv-' + key);
   if(input) syncControllerField(key);
 
-  const row = document.querySelector(`.obs-row[data-key="${key}"]`);
+  // NIBP keys share a combined row keyed as 'nibp'.
+  const rowKey = (key === 'sbp' || key === 'dbp') ? 'nibp' : key;
+  const row = document.querySelector(`.obs-row[data-key="${rowKey}"]`);
   if(row) row.classList.toggle('obs-off', !enabled);
 
   const toggleBtn = document.querySelector(`.obs-toggle[data-key="${key}"]`);
