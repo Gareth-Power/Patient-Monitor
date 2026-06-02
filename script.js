@@ -439,11 +439,12 @@ function clampObsValue(key, value){
 }
 
 const noSleep = new NoSleep();
+let noSleepEnabled = false;
 function enableNoSleep(){
-  noSleep.enable();
+  if(noSleepEnabled) return;
+  noSleepEnabled = true;
+  noSleep.enable().catch(() => {});
 }
-document.addEventListener('click', enableNoSleep, { once: true });
-document.addEventListener('touchstart', enableNoSleep, { once: true });
 
 function buildObsRows(){
   const container = document.getElementById('obsRows');
@@ -466,9 +467,9 @@ function buildObsRows(){
         <input class="obs-input" id="cv-${o.key}" type="number" inputmode="decimal" step="${o.step}" min="${o.min}" max="${o.max}" value="${val}" aria-label="${o.label}">
         <button class="obs-btn" type="button" data-action="increase" data-key="${o.key}">+</button>
       </div>`;
-    row.querySelector('[data-action="decrease"]').addEventListener('click', () => nudge(o.key, -o.step));
-    row.querySelector('[data-action="increase"]').addEventListener('click', () => nudge(o.key, o.step));
-    row.querySelector('[data-action="toggle"]').addEventListener('click', () => toggleMetric(o.key));
+    row.querySelector('[data-action="decrease"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, -o.step); });
+    row.querySelector('[data-action="increase"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, o.step); });
+    row.querySelector('[data-action="toggle"]').addEventListener('click', () => { enableNoSleep(); toggleMetric(o.key); });
     const input = row.querySelector('.obs-input');
     input.addEventListener('change', () => applyManualInput(o.key, input.value));
     input.addEventListener('blur', () => applyManualInput(o.key, input.value));
@@ -626,12 +627,12 @@ function setupController(){
   const rhythmSelect = document.getElementById('rhythmSelect');
   if(rhythmSelect){
     rhythmSelect.value = ctrlRhythm;
-    rhythmSelect.addEventListener('change', () => setRhythm(rhythmSelect.value));
+    rhythmSelect.addEventListener('change', () => { enableNoSleep(); setRhythm(rhythmSelect.value); });
   }
   buildObsRows();
 
   const holdBtn = document.getElementById('holdBtn');
-  if(holdBtn) holdBtn.addEventListener('click', toggleHold);
+  if(holdBtn) holdBtn.addEventListener('click', () => { enableNoSleep(); toggleHold(); });
 
   const peer = new Peer({debug:0});
   peer.on('open', () => {
@@ -663,6 +664,7 @@ const monitorStage = document.querySelector('.monitor-stage');
 
 if(fsBtn && monitorStage){
   fsBtn.addEventListener('click', async () => {
+    enableNoSleep();
     try {
       if(!document.fullscreenElement && monitorStage.requestFullscreen){
         await monitorStage.requestFullscreen();
