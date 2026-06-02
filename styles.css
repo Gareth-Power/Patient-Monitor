@@ -85,34 +85,9 @@ body {
   justify-content: center;
 }
 
-.monitor-stage:fullscreen .monitor-grid {
-  --monitor-scale: 1.4;
-  --text-scale: 1.35;
-  width: calc(100% / var(--monitor-scale));
-  max-height: calc(100% / var(--monitor-scale));
-  aspect-ratio: 16 / 9;
-  transform: scale(var(--monitor-scale));
-  transform-origin: center center;
-}
-
-.monitor-stage:fullscreen .wave-label {
-  font-size: calc(10px * var(--text-scale));
-}
-
-.monitor-stage:fullscreen .num-label {
-  font-size: calc(9px * var(--text-scale));
-}
-
-.monitor-stage:fullscreen .num-value {
-  font-size: calc(26px * var(--text-scale));
-}
-
-.monitor-stage:fullscreen .nibp .num-value {
-  font-size: calc(18px * var(--text-scale));
-}
-
-.monitor-stage:fullscreen .num-sub {
-  font-size: calc(11px * var(--text-scale));
+.monitor-stage:fullscreen .monitor-grid-wrap {
+  max-width: calc((100vh - 32px) * 16 / 9);
+  max-height: 100%;
 }
 
 .monitor-stage:fullscreen .viewer-fab {
@@ -126,17 +101,33 @@ body {
   z-index: 2;
 }
 
-.monitor-grid {
+/* 16:9 sizing box. Owns the visible area; the grid below renders into a fixed
+   logical resolution and is then transform-scaled to fit this box. */
+.monitor-grid-wrap {
+  position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
+  background: #000000;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* Fixed logical render surface — 800 x 450 (16:9). Everything inside uses
+   these design-pixel dimensions; we then scale uniformly via --monitor-scale
+   so labels, numerics, and traces stretch together like a picture. */
+.monitor-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 800px;
+  height: 450px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: none;
-  border-radius: 10px;
   background: #000000;
-  overflow: hidden;
   padding: 12px;
+  transform-origin: top left;
+  transform: scale(var(--monitor-scale, 1));
 }
 
 .waveforms { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; height: 100%; flex: 1 1 auto; }
@@ -298,7 +289,5 @@ canvas.wave { width: 100%; height: 100%; min-height: 0; display: block; flex: 1 
 
 @media (max-width: 640px) {
   body { padding: 9px 19px 19px 19px; }
-  .monitor-grid { aspect-ratio: auto; }
-  .wave-row { grid-template-columns: minmax(0, 1fr) 96px; }
   .qr-box { grid-template-columns: 1fr; }
 }

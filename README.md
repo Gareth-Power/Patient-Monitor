@@ -1,0 +1,81 @@
+# Patient Monitor Simulator
+
+A browser-based patient monitor simulator designed for clinical simulation and training. Displays live ECG, SpO2, and respiratory waveforms alongside vital sign numerics — all controllable in real time from a second device such as a phone or tablet.
+
+---
+
+## Getting Started
+
+Open the monitor on any device by visiting the GitHub Pages link for this repository. No installation or login is required — it runs entirely in your browser.
+
+---
+
+## The Monitor Screen
+
+When you first open the app, you will see the **monitor view**: a black screen showing three scrolling waveforms and a set of vital sign numbers.
+
+| Display | What it shows |
+|---|---|
+| **ECG – II** | Heart rhythm trace (green) and heart rate in bpm |
+| **SpO2 – Pleth** | Pulse oximetry waveform (blue) and oxygen saturation % |
+| **Resp** | Respiratory waveform (amber) and respiratory rate br/min |
+| **NIBP** | Systolic / diastolic blood pressure and mean arterial pressure |
+| **Temp** | Body temperature in °C |
+
+Use the **Fullscreen** button to expand the monitor to fill the screen — useful when projecting onto a large display in a simulation room.
+
+---
+
+## Controlling the Monitor from a Second Device
+
+The monitor is designed to be controlled from a separate phone or tablet so that a facilitator can change patient parameters without the learners seeing.
+
+**Steps:**
+
+1. On the monitor screen, look at the **QR code** shown below the waveform display.
+2. Scan the QR code with a phone or tablet — this opens the **controller screen** on that device.
+3. The status indicator will turn green once the controller is connected.
+
+The controller and monitor communicate directly between the two devices (peer-to-peer), so no data is sent to any server.
+
+---
+
+## Using the Controller
+
+The controller screen has two sections:
+
+### Rhythm
+
+Choose from the dropdown:
+
+- **Sinus** — normal sinus rhythm
+- **VT** — ventricular tachycardia
+- **VF** — ventricular fibrillation
+
+### Observations
+
+Each vital sign has a row with:
+- A **–** and **+** button to decrease or increase the value
+- A toggle button to switch the parameter **on** or **off** (simulating a probe being attached or removed)
+
+| Observation | What it controls |
+|---|---|
+| HR | Heart rate (bpm) |
+| SpO2 | Oxygen saturation (%) |
+| SBP / DBP | Systolic and diastolic blood pressure (mmHg) |
+| RR | Respiratory rate (breaths per minute) |
+| Temp | Temperature (°C) |
+
+Changes take effect on the monitor screen immediately.
+
+---
+
+## Refreshing / Resetting
+
+Refreshing the monitor page generates a new session. The controller QR code will change and any previously connected controller will disconnect. Simply scan the new QR code to reconnect.
+
+---
+
+## License
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).

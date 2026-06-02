@@ -15,12 +15,20 @@ const waveStates = waveConfigs.map(cfg => {
 let lastT = null;
 let acc = 0;
 let ecgPhase = 0;
-let plethPhase = 0;
 let respPhase = 0;
 let vfPhase = 0;
 
-const TRACE_SWEEP_RATE = 82.5;
-const HORIZONTAL_WAVE_COMPRESSION = 1.92;
+// Visible time window for the trace. 6 s is the standard clinical strip duration —
+// ~25 mm/sec equivalent on a typical screen — and shows more cycles per sweep.
+const TARGET_SECONDS_VISIBLE = 6;
+// Pulse transit time used to phase-lock the SpO2 pleth to the ECG R-wave.
+const PTT_SEC = 0.25;
+// Canvas bitmaps are rendered at a constant internal resolution and stretched by
+// CSS — same behaviour as a fixed-size video frame. This makes the trace look
+// identical at every container size; the monitor grid then scales as a whole
+// via --monitor-scale on .monitor-grid.
+const REF_WAVE_WIDTH = 2400;
+const REF_WAVE_HEIGHT = 300;
 
 const initialMonitorState = {
   hr:72, spo2:98, rr:16, temp:36.7, sbp:120, dbp:80, rhythm:'NSR'
@@ -49,38 +57,102 @@ function smoothStep(edge0, edge1, x){
 }
 
 function getEffectivePulseRate(state){
-  if(state.rhythm === 'VT') return Math.max(state.hr, 0);
+  if(state.rhythm === 'VT') return clamp(state.hr || 180, 120, 250);
+  if(state.rhythm === 'VF') return 0;
   return Math.max(state.hr, 0);
+}
+
+function getCurrentSweepRate(){
+  // Canvas pixels per second. Derived from canvas width so the visible time window
+  // stays at TARGET_SECONDS_VISIBLE regardless of canvas size (small vs fullscreen).
+  const primary = waveStates[0];
+  if(!primary || !primary.width) return 0;
+  return primary.width / TARGET_SECONDS_VISIBLE;
+}
+
+function getEcgIntervals(hr){
+  const rrSec = 60 / Math.max(hr, 1);
+  // Bazett-style square-root shortening for PR/QT as HR rises.
+  const sqrtRR = Math.sqrt(Math.min(rrSec, 1.5));
+  let prInterval = 0.16 * sqrtRR;   // P start → QRS start
+  let qtInterval = 0.40 * sqrtRR;   // QRS start → T end
+  const qrsDur = 0.090;
+  // Stop events from spilling into the TP segment at extreme rates.
+  const totalEvents = prInterval + qtInterval;
+  const maxWindow = 0.85 * rrSec;
+  if(totalEvents > maxWindow){
+    const scale = maxWindow / totalEvents;
+    prInterval *= scale;
+    qtInterval *= scale;
+  }
+  // Keep P inside the PR interval so it cannot bleed into the QRS.
+  const pDur = Math.max(0.04, Math.min(0.085, prInterval * 0.85));
+  return { rrSec, pDur, prInterval, qrsDur, qtInterval };
+}
+
+function getPlethPhase(){
+  // Pleth foot aligns with R-peak + PTT, so the upstroke lags QRS by ~250 ms.
+  const hr = Math.max(cur.hr, 1);
+  const { rrSec, prInterval, qrsDur } = getEcgIntervals(hr);
+  const rPeakTime = prInterval + qrsDur * 0.32;
+  const offsetPhase = (rPeakTime + PTT_SEC) / rrSec;
+  return ((ecgPhase - offsetPhase) % 1 + 1) % 1;
 }
 
 function ecgSample(phase, s){
   if(!metricEnabled.hr) return 0;
-  if(s.rhythm === 'VF') return (Math.random() - .5) * .65 + .22 * Math.sin(vfPhase) + .12 * Math.sin(vfPhase * 1.9);
+  if(s.rhythm === 'VF'){
+    // Coarse-to-fine VF with a slow amplitude envelope to break up the uniform-noise look.
+    const envelope = 0.65 + 0.22 * Math.sin(vfPhase * 0.3);
+    return envelope * ((Math.random() - .5) * .65
+                      + .22 * Math.sin(vfPhase)
+                      + .12 * Math.sin(vfPhase * 1.9));
+  }
   if(s.rhythm === 'VT'){
-    // Fixed monomorphic VT model with a sharper (less rounded) apex.
     const theta = 2 * Math.PI * phase;
     const tri = (2 / Math.PI) * Math.asin(Math.sin(theta));
     const shape =
       0.9 * tri +
       0.22 * Math.sin(2 * theta - 0.5) +
-      0.1 * Math.sin(3 * theta + 0.9);
+      0.10 * Math.sin(3 * theta + 0.9);
     return 1.08 * shape;
   }
   if(s.hr <= 0) return 0;
-  const p = phase;
+
+  const { rrSec, pDur, prInterval, qrsDur, qtInterval } = getEcgIntervals(s.hr);
+  const t = phase * rrSec;
+  const qrsStart = prInterval;
+  const qrsEnd = qrsStart + qrsDur;
+  const tEnd = qrsStart + qtInterval;
+  const tDur = Math.max(qtInterval * 0.45, 0.08);
+  const tStart = tEnd - tDur;
+
   const perfusion = clamp((s.sbp + s.dbp) / 210, 0.35, 1.15);
   const tempGain = clamp(1 + (s.temp - 36.7) * 0.03, 0.9, 1.08);
   const qrsGain = perfusion * tempGain;
+
   let y = 0;
-  if(p < .1) y += .1 * Math.sin(Math.PI * p / .1);
-  const q = (p - .14) / .05;
-  if(q >= 0 && q <= 1){
-    if(q < .1) y -= .08 * (q / .1) * qrsGain;
-    else if(q < .3) y += .95 * Math.sin(Math.PI * (q - .1) / .2) * qrsGain;
-    else if(q < .5) y -= .25 * Math.sin(Math.PI * (q - .3) / .2) * qrsGain;
+
+  // P wave (rounded positive deflection, ~85 ms).
+  if(t >= 0 && t < pDur){
+    y += 0.10 * Math.sin(Math.PI * (t / pDur));
   }
-  const tp = (p - .25) / .12;
-  if(tp >= 0 && tp <= 1) y += .18 * Math.sin(Math.PI * tp) * clamp((s.spo2 / 98) * 0.7 + 0.3, 0.15, 1.1);
+
+  // QRS complex — Q dip, R peak, S dip, with a brief return to baseline.
+  if(t >= qrsStart && t < qrsEnd){
+    const u = (t - qrsStart) / qrsDur;
+    if(u < 0.15) y -= 0.08 * (u / 0.15) * qrsGain;
+    else if(u < 0.50) y += 0.98 * Math.sin(Math.PI * (u - 0.15) / 0.35) * qrsGain;
+    else if(u < 0.85) y -= 0.22 * Math.sin(Math.PI * (u - 0.50) / 0.35) * qrsGain;
+  }
+
+  // T wave (broad positive after the ST segment).
+  if(t >= tStart && t < tEnd){
+    const u = (t - tStart) / tDur;
+    const oxyGain = clamp((s.spo2 / 98) * 0.7 + 0.3, 0.15, 1.1);
+    y += 0.20 * Math.sin(Math.PI * u) * oxyGain;
+  }
+
   return y + (Math.random() - .5) * 0.01;
 }
 
@@ -102,24 +174,59 @@ function respSample(phase, s){
   if(!metricEnabled.rr) return 0;
   if(s.rr <= 0) return (Math.random() - .5) * .03;
   const amp = clamp(0.32 + (s.temp - 35) * 0.025 + (s.spo2 / 100) * 0.1, 0.22, 0.62);
-  const wave = Math.sin(2 * Math.PI * phase);
-  const bias = 0.08 * Math.sin(4 * Math.PI * phase);
-  return amp * wave + bias + (Math.random() - .5) * .02;
+  // I:E ~ 1:2 — steeper rise during inspiration, slower fall during expiration.
+  const iFrac = 0.34;
+  let wave;
+  if(phase < iFrac){
+    const u = phase / iFrac;
+    wave = -Math.cos(Math.PI * u);
+  } else {
+    const u = (phase - iFrac) / (1 - iFrac);
+    wave = Math.cos(Math.PI * u);
+  }
+  return amp * wave + (Math.random() - .5) * .02;
+}
+
+function getPhaseForState(state){
+  if(state.id === 'ecgC') return ecgPhase;
+  if(state.id === 'spo2C') return getPlethPhase();
+  return respPhase;
+}
+
+function getPhaseStepForState(state, currentState){
+  const rate = getCurrentSweepRate();
+  if(!rate) return 0;
+  const sweepDt = 1 / rate;
+  if(state.id === 'ecgC' || state.id === 'spo2C'){
+    return sweepDt * getEffectivePulseRate(currentState) / 60;
+  }
+  return sweepDt * Math.max(currentState.rr, 0) / 60;
+}
+
+function rebuildWaveBuffer(state, currentState){
+  const centerY = state.height / 2;
+  const phaseNow = getPhaseForState(state);
+  const phaseStep = getPhaseStepForState(state, currentState);
+  const newBuf = new Float32Array(state.width);
+
+  for(let x = 0; x < state.width; x++){
+    const raw = phaseNow - (state.width - 1 - x) * phaseStep;
+    const phase = ((raw % 1) + 1) % 1;
+    newBuf[x] = centerY - state.sample(phase, currentState) * (state.height * state.scale);
+  }
+
+  state.buf = newBuf;
+  state.wp = state.width - 1;
 }
 
 function resizeWaveDisplays(){
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
   waveStates.forEach(state => {
-    const rect = state.canvas.getBoundingClientRect();
-    const width = Math.max(2, Math.round(rect.width * dpr));
-    const height = Math.max(2, Math.round(rect.height * dpr));
-    if(state.canvas.width !== width || state.canvas.height !== height){
-      state.canvas.width = width;
-      state.canvas.height = height;
-      state.width = width;
-      state.height = height;
-      state.buf = new Float32Array(width).fill(height / 2);
-      state.wp = 0;
+    if(state.canvas.width !== REF_WAVE_WIDTH || state.canvas.height !== REF_WAVE_HEIGHT){
+      state.canvas.width = REF_WAVE_WIDTH;
+      state.canvas.height = REF_WAVE_HEIGHT;
+      state.width = REF_WAVE_WIDTH;
+      state.height = REF_WAVE_HEIGHT;
+      rebuildWaveBuffer(state, cur);
     }
   });
 }
@@ -131,7 +238,7 @@ function drawWave(state){
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
   ctx.strokeStyle = '#2a2a2a';
-  ctx.lineWidth = .5;
+  ctx.lineWidth = 1.25;
   const xStep = Math.max(24, Math.round(width / 12));
   for(let x = 0; x < width; x += xStep){
     ctx.beginPath();
@@ -171,7 +278,7 @@ function drawWave(state){
 
   // Draw contiguous non-gap segments only.
   ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 3.75;
   let drawing = false;
   for(let x = 0; x < width; x++){
     if(inGap(x)){
@@ -227,19 +334,17 @@ function monitorFrame(ts){
   cur.rhythm = tgt.rhythm;
   updateNumerics();
 
-  acc += dt * TRACE_SWEEP_RATE;
+  acc += dt * getCurrentSweepRate();
   const steps = Math.floor(acc);
   acc -= steps;
   for(let s = 0; s < steps; s++){
     const sampleDt = dt / Math.max(steps, 1);
     if(cur.rhythm === 'VF') vfPhase += sampleDt * 24;
     const pulseRate = getEffectivePulseRate(cur);
-    const pulsePhaseStep = sampleDt * pulseRate * HORIZONTAL_WAVE_COMPRESSION / 60;
-    ecgPhase = (ecgPhase + pulsePhaseStep) % 1;
-    plethPhase = (plethPhase + pulsePhaseStep) % 1;
-    respPhase = (respPhase + sampleDt * Math.max(cur.rr, 0) * HORIZONTAL_WAVE_COMPRESSION / 60) % 1;
+    ecgPhase = (ecgPhase + sampleDt * pulseRate / 60) % 1;
+    respPhase = (respPhase + sampleDt * Math.max(cur.rr, 0) / 60) % 1;
     waveStates.forEach(state => {
-      const phase = state.id === 'ecgC' ? ecgPhase : state.id === 'spo2C' ? plethPhase : respPhase;
+      const phase = getPhaseForState(state);
       const centerY = state.height / 2;
       state.buf[state.wp] = centerY - state.sample(phase, cur) * (state.height * state.scale);
       state.wp = (state.wp + 1) % state.width;
@@ -512,8 +617,24 @@ if(fsBtn && monitorStage){
   });
 }
 
-window.addEventListener('resize', resizeWaveDisplays);
-document.addEventListener('fullscreenchange', resizeWaveDisplays);
+function fitMonitorGrid(){
+  const wrap = document.querySelector('.monitor-grid-wrap');
+  const grid = document.querySelector('.monitor-grid');
+  if(!wrap || !grid) return;
+  const scale = wrap.clientWidth / 800;
+  if(scale > 0) grid.style.setProperty('--monitor-scale', scale);
+}
+
+if(!isController){
+  fitMonitorGrid();
+  window.addEventListener('resize', fitMonitorGrid);
+  document.addEventListener('fullscreenchange', fitMonitorGrid);
+  const gridWrap = document.querySelector('.monitor-grid-wrap');
+  if(gridWrap && typeof ResizeObserver !== 'undefined'){
+    new ResizeObserver(fitMonitorGrid).observe(gridWrap);
+  }
+}
+
 document.addEventListener('visibilitychange', () => {
   if(document.visibilityState === 'visible' && !wakeLockSentinel){
     requestWakeLock();
