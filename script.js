@@ -7,7 +7,6 @@ const isController = params.get('role') === 'controller';
 // Reuse the room from the URL if present (e.g. a copied monitor URL); otherwise
 // mint a fresh one for a brand new monitor session.
 const roomId = params.get('room') || ('pm-' + Math.random().toString(36).slice(2, 8));
-const roomParam = roomId;
 
 /* WAVEFORM ENGINE */
 const waveConfigs = [
@@ -323,10 +322,6 @@ function updateNumerics(){
   const nibpEnabled = metricEnabled.sbp && metricEnabled.dbp;
   el('nibp', nibpEnabled ? (cur.sbp > 0 ? `${Math.round(cur.sbp)}/${Math.round(cur.dbp)}` : '---/---') : offValue);
   el('map', nibpEnabled && cur.sbp > 0 ? `MAP ${Math.round((cur.sbp + 2 * cur.dbp) / 3)}` : '');
-  const rh = document.getElementById('rhythm');
-  if(rh){
-    rh.textContent = '';
-  }
 }
 
 function monitorFrame(ts){
@@ -408,11 +403,6 @@ function setupMonitor(){
     reconnectPeriod: 3000,
   });
 
-  const peerStatus = document.getElementById('peerStatus');
-  function setMonitorStatus(text, cls){
-    if(peerStatus){ peerStatus.textContent = text; peerStatus.className = 'peer-status' + (cls ? ' ' + cls : ''); }
-  }
-
   client.on('connect', () => {
     client.subscribe(topic, { qos: 1 });
     // The QR code and the displayed URL both open the controller for this room.
@@ -420,7 +410,6 @@ function setupMonitor(){
     document.getElementById('roomIdLabel').textContent = ctrlUrl;
     const qrImage = document.getElementById('qrImage');
     qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
-    setMonitorStatus('Waiting for controller', '');
     // Ask any already-connected controller to re-broadcast its state so a monitor
     // that joins late (e.g. a second screen) syncs to the current values.
     client.publish(topic, JSON.stringify({ type: 'request-state', _src: 'monitor' }), { qos: 1 });
@@ -429,17 +418,11 @@ function setupMonitor(){
   client.on('message', (t, payload) => {
     try {
       const msg = JSON.parse(payload.toString());
-      if(msg._src === 'ctrl'){
-        if(msg.type === 'connect') setMonitorStatus('Controller connected', 'connected');
-        else if(msg.type === 'disconnect') setMonitorStatus('Waiting for controller', '');
-        else handleMonitorMessage(msg);
+      if(msg._src === 'ctrl' && msg.type !== 'connect' && msg.type !== 'disconnect'){
+        handleMonitorMessage(msg);
       }
     } catch(e) {}
   });
-
-  client.on('error', () => setMonitorStatus('Broker error', ''));
-  client.on('reconnect', () => setMonitorStatus('Reconnecting…', ''));
-
 }
 
 /* CONTROLLER SETUP */
@@ -748,7 +731,7 @@ function setupController(){
     ctrlStatusEl.className = 'ctrl-status ' + (ok === true ? 'ok' : ok === false ? 'err' : '');
   }
 
-  const topic = 'patient-monitor/' + roomParam;
+  const topic = 'patient-monitor/' + roomId;
   setCtrlStatus('Connecting…');
 
   const client = mqtt.connect(MQTT_BROKER, {
@@ -769,11 +752,11 @@ function setupController(){
   };
 
   function publishFullState(){
-    client.publish(topic, JSON.stringify({ type: 'connect', _src: 'ctrl' }), { qos: 1 });
-    client.publish(topic, JSON.stringify({ type: 'rhythm', value: ctrlRhythm, _src: 'ctrl' }), { qos: 1 });
+    ctrlConn.send({ type: 'connect' });
+    ctrlConn.send({ type: 'rhythm', value: ctrlRhythm });
     obsConfig.forEach(o => {
-      client.publish(topic, JSON.stringify({ type: 'obs', key: o.key, value: ctrlState[o.key], _src: 'ctrl' }), { qos: 1 });
-      client.publish(topic, JSON.stringify({ type: 'metric', key: o.key, enabled: metricEnabled[o.key], _src: 'ctrl' }), { qos: 1 });
+      ctrlConn.send({ type: 'obs', key: o.key, value: ctrlState[o.key] });
+      ctrlConn.send({ type: 'metric', key: o.key, enabled: metricEnabled[o.key] });
     });
   }
 
