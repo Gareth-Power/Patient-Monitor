@@ -359,6 +359,23 @@ function monitorFrame(ts){
 }
 
 /* MONITOR PEER SETUP */
+const peerConfig = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      // Free TURN relay — handles strict NAT and mobile (cellular) networks.
+      // Replace with your own credentials from metered.ca for production use.
+      { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+    ],
+    iceTransportPolicy: 'all',
+  }
+};
+
 function setupMonitor(){
   document.getElementById('monitorView').style.display = 'flex';
   resizeWaveDisplays();
@@ -367,7 +384,7 @@ function setupMonitor(){
   const roomId = 'pm-' + Math.random().toString(36).slice(2, 8);
   document.getElementById('roomIdLabel').textContent = roomId;
 
-  const peer = new Peer(roomId, {debug:0});
+  const peer = new Peer(roomId, peerConfig);
   peer.on('open', id => {
     const url = location.href.split('?')[0] + '?room=' + id;
     document.getElementById('roomIdLabel').textContent = url;
@@ -686,7 +703,7 @@ function setupController(){
     ctrlStatusEl.className = 'ctrl-status ' + (ok === true ? 'ok' : ok === false ? 'err' : '');
   }
 
-  const peer = new Peer({debug:0});
+  const peer = new Peer(peerConfig);
   peer.on('open', () => {
     setCtrlStatus('Connecting to monitor…');
     const conn = peer.connect(roomParam, {reliable:true});
