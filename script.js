@@ -714,6 +714,8 @@ function setupController(){
   });
 
   // Wrap the MQTT client in the same .send() interface used everywhere else.
+  // Changes made while disconnected are captured in ctrlState/ctrlRhythm/metricEnabled
+  // and re-sent by publishFullState() on every (re)connect.
   ctrlConn = {
     send(msg){
       if(client.connected){
@@ -722,15 +724,18 @@ function setupController(){
     }
   };
 
-  client.on('connect', () => {
-    setCtrlStatus('Connected', true);
-    // Announce presence so monitor UI updates.
+  function publishFullState(){
     client.publish(topic, JSON.stringify({ type: 'connect', _src: 'ctrl' }), { qos: 1 });
-    // Send initial state.
     client.publish(topic, JSON.stringify({ type: 'rhythm', value: ctrlRhythm, _src: 'ctrl' }), { qos: 1 });
     obsConfig.forEach(o => {
+      client.publish(topic, JSON.stringify({ type: 'obs', key: o.key, value: ctrlState[o.key], _src: 'ctrl' }), { qos: 1 });
       client.publish(topic, JSON.stringify({ type: 'metric', key: o.key, enabled: metricEnabled[o.key], _src: 'ctrl' }), { qos: 1 });
     });
+  }
+
+  client.on('connect', () => {
+    setCtrlStatus('Connected', true);
+    publishFullState();
   });
 
   client.on('reconnect', () => {
