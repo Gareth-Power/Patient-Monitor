@@ -295,7 +295,8 @@ canvas.wave { width: 100%; height: 100%; min-height: 0; display: block; flex: 1 
 .hold-btn:active { background: #f1f5f9; }
 .hold-btn.hold-active { background: #fef9c3; border-color: #fde047; color: #713f12; }
 
-.obs-input.obs-staged { border-color: #fde047; background: #fefce8; }
+.obs-input.obs-staged,
+.rhythm-select.obs-staged { border-color: #fde047; background: #fefce8; }
 
 @keyframes obs-flash-green {
   0%   { border-color: #86efac; background: #dcfce7; }
@@ -303,6 +304,14 @@ canvas.wave { width: 100%; height: 100%; min-height: 0; display: block; flex: 1 
   100% { border-color: var(--border); background: #f8fafc; }
 }
 .obs-input.obs-flash { animation: obs-flash-green 700ms ease-out forwards; }
+
+/* The rhythm select rests on #fff, so it returns there rather than #f8fafc. */
+@keyframes obs-flash-green-white {
+  0%   { border-color: #86efac; background: #dcfce7; }
+  60%  { border-color: #86efac; background: #dcfce7; }
+  100% { border-color: var(--border); background: #fff; }
+}
+.rhythm-select.obs-flash { animation: obs-flash-green-white 700ms ease-out forwards; }
 
 @media (max-width: 640px) {
   body { padding: 9px 19px 19px 19px; }

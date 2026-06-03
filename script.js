@@ -380,6 +380,9 @@ function handleMonitorMessage(msg){
       tgt[k] = clampObsValue(k, msg.values[k]);
     });
     rampEndTime = performance.now() / 1000 + RAMP_DURATION;
+    // A rhythm change staged during Hold rides along in the ramp message; apply
+    // it immediately (rhythm is a discrete switch, not a ramped value).
+    if(msg.rhythm !== undefined) tgt.rhythm = msg.rhythm;
   } else if(msg.type === 'metric'){
     getMetricGroupKeys(msg.key).forEach(k => {
       metricEnabled[k] = !!msg.enabled;
@@ -447,6 +450,8 @@ let ctrlState = {
 let ctrlRhythm = 'NSR';
 let holdActive = false;
 let heldState = null;
+// Staged rhythm while Hold is active; null means no rhythm change is queued.
+let heldRhythm = null;
 
 const obsConfig = [
   {key:'hr',   label:'HR',   unit:'bpm', color:'#00ff41', step:1,  min:0,   max:300},
@@ -653,6 +658,15 @@ function flashInput(key){
   input.addEventListener('animationend', () => input.classList.remove('obs-flash'), { once: true });
 }
 
+function flashRhythm(){
+  const sel = document.getElementById('rhythmSelect');
+  if(!sel) return;
+  sel.classList.remove('obs-flash');
+  void sel.offsetWidth;
+  sel.classList.add('obs-flash');
+  sel.addEventListener('animationend', () => sel.classList.remove('obs-flash'), { once: true });
+}
+
 function syncHoldIndicators(){
   obsConfig.forEach(o => {
     const input = document.getElementById('cv-' + o.key);
@@ -660,6 +674,8 @@ function syncHoldIndicators(){
     const staged = holdActive && heldState && heldState[o.key] !== undefined;
     input.classList.toggle('obs-staged', staged);
   });
+  const sel = document.getElementById('rhythmSelect');
+  if(sel) sel.classList.toggle('obs-staged', holdActive && heldRhythm !== null);
 }
 
 function toggleHold(){
@@ -667,17 +683,24 @@ function toggleHold(){
   const btn = document.getElementById('holdBtn');
   if(holdActive){
     heldState = {};
+    heldRhythm = null;
     if(btn){
       btn.textContent = 'Release';
       btn.classList.add('hold-active');
     }
   } else {
-    if(heldState && ctrlConn){
-      const keys = Object.keys(heldState);
-      ctrlConn.send({type:'ramp', values: {...heldState}});
+    if(ctrlConn){
+      const keys = heldState ? Object.keys(heldState) : [];
+      // Send the staged obs values and any staged rhythm together in one message
+      // so the change lands on every monitor at the same moment.
+      const msg = {type:'ramp', values: {...(heldState || {})}};
+      if(heldRhythm !== null) msg.rhythm = heldRhythm;
+      ctrlConn.send(msg);
       keys.forEach(flashInput);
+      if(heldRhythm !== null) flashRhythm();
     }
     heldState = null;
+    heldRhythm = null;
     syncHoldIndicators();
     if(btn){
       btn.textContent = 'Hold';
@@ -688,7 +711,13 @@ function toggleHold(){
 
 function setRhythm(rhythm){
   ctrlRhythm = rhythm;
-  if(ctrlConn) ctrlConn.send({type:'rhythm', value: rhythm});
+  if(holdActive){
+    heldRhythm = rhythm;
+    syncHoldIndicators();
+  } else {
+    if(ctrlConn) ctrlConn.send({type:'rhythm', value: rhythm});
+    flashRhythm();
+  }
 }
 
 function lockControllerZoom(){
