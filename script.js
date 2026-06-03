@@ -398,7 +398,6 @@ function setupMonitor(){
   // opened on additional monitors that join the same session.
   const monitorUrl = location.href.split('?')[0] + '?room=' + roomId;
   history.replaceState(null, '', monitorUrl);
-  document.getElementById('roomIdLabel').textContent = monitorUrl;
 
   const client = mqtt.connect(MQTT_BROKER, {
     clientId: 'monitor-' + Math.random().toString(36).slice(2, 10),
@@ -413,8 +412,9 @@ function setupMonitor(){
 
   client.on('connect', () => {
     client.subscribe(topic, { qos: 1 });
-    // The QR code opens the controller for this room.
+    // The QR code and the displayed URL both open the controller for this room.
     const ctrlUrl = monitorUrl + '&role=controller';
+    document.getElementById('roomIdLabel').textContent = ctrlUrl;
     const qrImage = document.getElementById('qrImage');
     qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
     setMonitorStatus('Waiting for controller', '');
