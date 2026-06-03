@@ -28,6 +28,10 @@ When you first open the app, you will see the **monitor view**: a black screen s
 
 Use the **Fullscreen** button to expand the monitor to fill the screen — useful when projecting onto a large display in a simulation room.
 
+### Showing the same monitor on multiple screens
+
+Each monitor session has a room name that appears in the page URL once it loads (for example `…/?room=pm-a1b2c3`). To display the **same** monitor on another screen — a second projector, a screen in the control room, etc. — just copy that URL and open it on the other device. Every monitor sharing the room stays synced to the same controller in real time, and a monitor that joins late automatically catches up to the current vitals.
+
 ---
 
 ## Controlling the Monitor from a Second Device
@@ -40,7 +44,7 @@ The monitor is designed to be controlled from a separate phone or tablet so that
 2. Scan the QR code with a phone or tablet — this opens the **controller screen** on that device.
 3. The status indicator will turn green once the controller is connected.
 
-The controller and monitor communicate directly between the two devices (peer-to-peer), so no data is sent to any server.
+The controller and monitor communicate through a public MQTT message broker over a secure WebSocket connection. Each session uses its own randomly generated room ID, so messages stay scoped to your monitor and controller pair. This approach works reliably across different networks, NATs, and cellular connections.
 
 ---
 
@@ -98,6 +102,7 @@ This project is licensed under the [GNU Affero General Public License v3.0](LICE
 
 This project makes use of the following third-party libraries and services, each with their own license terms:
 
-- **[PeerJS](https://peerjs.com/)** — peer-to-peer communication. MIT License.
+- **[MQTT.js](https://github.com/mqttjs/MQTT.js)** — MQTT messaging between the monitor and controller. MIT License.
+- **[HiveMQ Public Broker](https://www.hivemq.com/mqtt/public-mqtt-broker/)** — public MQTT broker used to relay messages between devices.
 - **[NoSleep.js](https://github.com/richtr/NoSleep.js)** — prevents display sleep on mobile devices. MIT License.
 - **[QR Server](https://goqr.me/api/)** — external API used to generate the controller QR code.

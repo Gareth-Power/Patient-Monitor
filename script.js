@@ -1,5 +1,13 @@
-const isController = location.search.includes('room=');
-const roomParam = isController ? new URLSearchParams(location.search).get('room') : null;
+// A session is identified by a room id carried in the URL. The `role` param
+// distinguishes a controller from a monitor so that the same room can be opened
+// on multiple monitors (just copy the monitor URL) while a single controller
+// drives them all.
+const params = new URLSearchParams(location.search);
+const isController = params.get('role') === 'controller';
+// Reuse the room from the URL if present (e.g. a copied monitor URL); otherwise
+// mint a fresh one for a brand new monitor session.
+const roomId = params.get('room') || ('pm-' + Math.random().toString(36).slice(2, 8));
+const roomParam = roomId;
 
 /* WAVEFORM ENGINE */
 const waveConfigs = [
@@ -384,9 +392,13 @@ function setupMonitor(){
   resizeWaveDisplays();
   requestAnimationFrame(monitorFrame);
 
-  const roomId = 'pm-' + Math.random().toString(36).slice(2, 8);
   const topic = 'patient-monitor/' + roomId;
-  document.getElementById('roomIdLabel').textContent = roomId;
+
+  // Surface this monitor's room in the address bar so the URL can be copied and
+  // opened on additional monitors that join the same session.
+  const monitorUrl = location.href.split('?')[0] + '?room=' + roomId;
+  history.replaceState(null, '', monitorUrl);
+  document.getElementById('roomIdLabel').textContent = monitorUrl;
 
   const client = mqtt.connect(MQTT_BROKER, {
     clientId: 'monitor-' + Math.random().toString(36).slice(2, 10),
@@ -401,11 +413,14 @@ function setupMonitor(){
 
   client.on('connect', () => {
     client.subscribe(topic, { qos: 1 });
-    const url = location.href.split('?')[0] + '?room=' + roomId;
-    document.getElementById('roomIdLabel').textContent = url;
+    // The QR code opens the controller for this room.
+    const ctrlUrl = monitorUrl + '&role=controller';
     const qrImage = document.getElementById('qrImage');
-    qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(url)}`;
+    qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
     setMonitorStatus('Waiting for controller', '');
+    // Ask any already-connected controller to re-broadcast its state so a monitor
+    // that joins late (e.g. a second screen) syncs to the current values.
+    client.publish(topic, JSON.stringify({ type: 'request-state', _src: 'monitor' }), { qos: 1 });
   });
 
   client.on('message', (t, payload) => {
@@ -735,7 +750,20 @@ function setupController(){
 
   client.on('connect', () => {
     setCtrlStatus('Connected', true);
+    // Listen for late-joining monitors asking for the current state.
+    client.subscribe(topic, { qos: 1 });
     publishFullState();
+  });
+
+  // A monitor that opens after the controller is already running requests the
+  // current state; replay it so every monitor stays in sync.
+  client.on('message', (t, payload) => {
+    try {
+      const msg = JSON.parse(payload.toString());
+      if(msg._src === 'monitor' && msg.type === 'request-state'){
+        publishFullState();
+      }
+    } catch(e) {}
   });
 
   client.on('reconnect', () => {
