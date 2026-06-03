@@ -397,6 +397,14 @@ function setupMonitor(){
   const monitorUrl = location.href.split('?')[0] + '?room=' + roomId;
   history.replaceState(null, '', monitorUrl);
 
+  // The QR code and the displayed URL both open the controller for this room.
+  // They depend only on the room id, not the broker, so render them immediately
+  // rather than waiting for the MQTT connection.
+  const ctrlUrl = monitorUrl + '&role=controller';
+  document.getElementById('roomIdLabel').textContent = ctrlUrl;
+  document.getElementById('qrImage').src =
+    `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
+
   const client = mqtt.connect(MQTT_BROKER, {
     clientId: 'monitor-' + Math.random().toString(36).slice(2, 10),
     clean: true,
@@ -405,11 +413,6 @@ function setupMonitor(){
 
   client.on('connect', () => {
     client.subscribe(topic, { qos: 1 });
-    // The QR code and the displayed URL both open the controller for this room.
-    const ctrlUrl = monitorUrl + '&role=controller';
-    document.getElementById('roomIdLabel').textContent = ctrlUrl;
-    const qrImage = document.getElementById('qrImage');
-    qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
     // Ask any already-connected controller to re-broadcast its state so a monitor
     // that joins late (e.g. a second screen) syncs to the current values.
     client.publish(topic, JSON.stringify({ type: 'request-state', _src: 'monitor' }), { qos: 1 });
