@@ -679,11 +679,20 @@ function setupController(){
   const holdBtn = document.getElementById('holdBtn');
   if(holdBtn) holdBtn.addEventListener('click', () => { enableNoSleep(); toggleHold(); });
 
+  const ctrlStatusEl = document.getElementById('ctrlStatus');
+  function setCtrlStatus(msg, ok){
+    if(!ctrlStatusEl) return;
+    ctrlStatusEl.textContent = msg;
+    ctrlStatusEl.className = 'ctrl-status ' + (ok === true ? 'ok' : ok === false ? 'err' : '');
+  }
+
   const peer = new Peer({debug:0});
   peer.on('open', () => {
+    setCtrlStatus('Connecting to monitor…');
     const conn = peer.connect(roomParam, {reliable:true});
-    ctrlConn = conn;
     conn.on('open', () => {
+      ctrlConn = conn;
+      setCtrlStatus('Connected', true);
       conn.send({type:'rhythm', value: ctrlRhythm});
       obsConfig.forEach(o => {
         conn.send({type:'metric', key: o.key, enabled: metricEnabled[o.key]});
@@ -691,10 +700,16 @@ function setupController(){
     });
     conn.on('close', () => {
       ctrlConn = null;
+      setCtrlStatus('Disconnected', false);
+    });
+    conn.on('error', () => {
+      ctrlConn = null;
+      setCtrlStatus('Connection error', false);
     });
   });
-  peer.on('error', () => {
+  peer.on('error', (err) => {
     ctrlConn = null;
+    setCtrlStatus('Could not reach monitor', false);
   });
 }
 
