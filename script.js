@@ -359,22 +359,25 @@ function monitorFrame(ts){
 }
 
 /* MONITOR PEER SETUP */
-const peerConfig = {
-  debug: 0,
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      // Free TURN relay — handles strict NAT and mobile (cellular) networks.
-      // Replace with your own credentials from metered.ca for production use.
-      { urls: 'turn:openrelay.metered.ca:80',   username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443',  username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
-    ],
-    iceTransportPolicy: 'all',
+// MQTT broker — plain WebSocket, works over any network/NAT/cellular.
+const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+
+function handleMonitorMessage(msg){
+  if(msg.type === 'rhythm'){
+    tgt.rhythm = msg.value;
+  } else if(msg.type === 'obs'){
+    tgt[msg.key] = clampObsValue(msg.key, msg.value);
+  } else if(msg.type === 'ramp'){
+    Object.keys(msg.values).forEach(k => {
+      tgt[k] = clampObsValue(k, msg.values[k]);
+    });
+    rampEndTime = performance.now() / 1000 + RAMP_DURATION;
+  } else if(msg.type === 'metric'){
+    getMetricGroupKeys(msg.key).forEach(k => {
+      metricEnabled[k] = !!msg.enabled;
+    });
   }
-};
+}
 
 function setupMonitor(){
   document.getElementById('monitorView').style.display = 'flex';
@@ -382,45 +385,43 @@ function setupMonitor(){
   requestAnimationFrame(monitorFrame);
 
   const roomId = 'pm-' + Math.random().toString(36).slice(2, 8);
+  const topic = 'patient-monitor/' + roomId;
   document.getElementById('roomIdLabel').textContent = roomId;
 
-  const peer = new Peer(roomId, peerConfig);
-  peer.on('open', id => {
-    const url = location.href.split('?')[0] + '?room=' + id;
+  const client = mqtt.connect(MQTT_BROKER, {
+    clientId: 'monitor-' + Math.random().toString(36).slice(2, 10),
+    clean: true,
+    reconnectPeriod: 3000,
+  });
+
+  const peerStatus = document.getElementById('peerStatus');
+  function setMonitorStatus(text, cls){
+    if(peerStatus){ peerStatus.textContent = text; peerStatus.className = 'peer-status' + (cls ? ' ' + cls : ''); }
+  }
+
+  client.on('connect', () => {
+    client.subscribe(topic, { qos: 1 });
+    const url = location.href.split('?')[0] + '?room=' + roomId;
     document.getElementById('roomIdLabel').textContent = url;
     const qrImage = document.getElementById('qrImage');
     qrImage.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(url)}`;
+    setMonitorStatus('Waiting for controller', '');
   });
 
-  peer.on('connection', conn => {
-    const peerStatus = document.getElementById('peerStatus');
-    if(peerStatus){
-      peerStatus.textContent = 'Controller connected';
-      peerStatus.className = 'peer-status connected';
-    }
-    conn.on('data', msg => {
-      if(msg.type === 'rhythm'){
-        tgt.rhythm = msg.value;
-      } else if(msg.type === 'obs'){
-        tgt[msg.key] = clampObsValue(msg.key, msg.value);
-      } else if(msg.type === 'ramp'){
-        Object.keys(msg.values).forEach(k => {
-          tgt[k] = clampObsValue(k, msg.values[k]);
-        });
-        rampEndTime = performance.now() / 1000 + RAMP_DURATION;
-      } else if(msg.type === 'metric'){
-        getMetricGroupKeys(msg.key).forEach(k => {
-          metricEnabled[k] = !!msg.enabled;
-        });
+  client.on('message', (t, payload) => {
+    try {
+      const msg = JSON.parse(payload.toString());
+      if(msg._src === 'ctrl'){
+        if(msg.type === 'connect') setMonitorStatus('Controller connected', 'connected');
+        else if(msg.type === 'disconnect') setMonitorStatus('Waiting for controller', '');
+        else handleMonitorMessage(msg);
       }
-    });
-    conn.on('close', () => {
-      if(peerStatus){
-        peerStatus.textContent = 'Waiting for controller';
-        peerStatus.className = 'peer-status';
-      }
-    });
+    } catch(e) {}
   });
+
+  client.on('error', () => setMonitorStatus('Broker error', ''));
+  client.on('reconnect', () => setMonitorStatus('Reconnecting…', ''));
+
 }
 
 /* CONTROLLER SETUP */
@@ -703,30 +704,50 @@ function setupController(){
     ctrlStatusEl.className = 'ctrl-status ' + (ok === true ? 'ok' : ok === false ? 'err' : '');
   }
 
-  const peer = new Peer(peerConfig);
-  peer.on('open', () => {
-    setCtrlStatus('Connecting to monitor…');
-    const conn = peer.connect(roomParam, {reliable:true});
-    conn.on('open', () => {
-      ctrlConn = conn;
-      setCtrlStatus('Connected', true);
-      conn.send({type:'rhythm', value: ctrlRhythm});
-      obsConfig.forEach(o => {
-        conn.send({type:'metric', key: o.key, enabled: metricEnabled[o.key]});
-      });
-    });
-    conn.on('close', () => {
-      ctrlConn = null;
-      setCtrlStatus('Disconnected', false);
-    });
-    conn.on('error', () => {
-      ctrlConn = null;
-      setCtrlStatus('Connection error', false);
+  const topic = 'patient-monitor/' + roomParam;
+  setCtrlStatus('Connecting…');
+
+  const client = mqtt.connect(MQTT_BROKER, {
+    clientId: 'ctrl-' + Math.random().toString(36).slice(2, 10),
+    clean: true,
+    reconnectPeriod: 3000,
+  });
+
+  // Wrap the MQTT client in the same .send() interface used everywhere else.
+  ctrlConn = {
+    send(msg){
+      if(client.connected){
+        client.publish(topic, JSON.stringify({ ...msg, _src: 'ctrl' }), { qos: 1 });
+      }
+    }
+  };
+
+  client.on('connect', () => {
+    setCtrlStatus('Connected', true);
+    // Announce presence so monitor UI updates.
+    client.publish(topic, JSON.stringify({ type: 'connect', _src: 'ctrl' }), { qos: 1 });
+    // Send initial state.
+    client.publish(topic, JSON.stringify({ type: 'rhythm', value: ctrlRhythm, _src: 'ctrl' }), { qos: 1 });
+    obsConfig.forEach(o => {
+      client.publish(topic, JSON.stringify({ type: 'metric', key: o.key, enabled: metricEnabled[o.key], _src: 'ctrl' }), { qos: 1 });
     });
   });
-  peer.on('error', (err) => {
-    ctrlConn = null;
-    setCtrlStatus('Could not reach monitor', false);
+
+  client.on('reconnect', () => {
+    setCtrlStatus('Reconnecting…');
+  });
+
+  client.on('close', () => {
+    setCtrlStatus('Disconnected', false);
+  });
+
+  client.on('error', () => {
+    setCtrlStatus('Connection error', false);
+  });
+
+  // Announce disconnect on page unload.
+  window.addEventListener('pagehide', () => {
+    client.publish(topic, JSON.stringify({ type: 'disconnect', _src: 'ctrl' }), { qos: 0 });
   });
 }
 
