@@ -362,8 +362,7 @@ function monitorFrame(ts){
 }
 
 /* MONITOR PEER SETUP */
-// MQTT broker — plain WebSocket, works over any network/NAT/cellular.
-const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+const NTFY_BASE = 'https://ntfy.sh';
 
 function handleMonitorMessage(msg){
   if(msg.type === 'rhythm'){
@@ -382,6 +381,10 @@ function handleMonitorMessage(msg){
     getMetricGroupKeys(msg.key).forEach(k => {
       metricEnabled[k] = !!msg.enabled;
     });
+  } else if(msg.type === 'fullstate'){
+    tgt.rhythm = msg.rhythm;
+    Object.keys(msg.obs).forEach(k => { tgt[k] = clampObsValue(k, msg.obs[k]); });
+    Object.keys(msg.metrics).forEach(k => { metricEnabled[k] = !!msg.metrics[k]; });
   }
 }
 
@@ -389,8 +392,9 @@ function setupMonitor(){
   document.getElementById('monitorView').style.display = 'flex';
   resizeWaveDisplays();
   requestAnimationFrame(monitorFrame);
+  enableNoSleep();
 
-  const topic = 'patient-monitor/' + roomId;
+  const ntfyUrl = NTFY_BASE + '/patient-monitor-' + roomId;
 
   // Surface this monitor's room in the address bar so the URL can be copied and
   // opened on additional monitors that join the same session.
@@ -398,34 +402,29 @@ function setupMonitor(){
   history.replaceState(null, '', monitorUrl);
 
   // The QR code and the displayed URL both open the controller for this room.
-  // They depend only on the room id, not the broker, so render them immediately
-  // rather than waiting for the MQTT connection.
   const ctrlUrl = monitorUrl + '&role=controller';
   document.getElementById('roomIdLabel').textContent = ctrlUrl;
   document.getElementById('qrImage').src =
     `https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(ctrlUrl)}`;
 
-  const client = mqtt.connect(MQTT_BROKER, {
-    clientId: 'monitor-' + Math.random().toString(36).slice(2, 10),
-    clean: true,
-    reconnectPeriod: 3000,
-  });
+  const es = new EventSource(ntfyUrl + '/sse');
 
-  client.on('connect', () => {
-    client.subscribe(topic, { qos: 1 });
-    // Ask any already-connected controller to re-broadcast its state so a monitor
-    // that joins late (e.g. a second screen) syncs to the current values.
-    client.publish(topic, JSON.stringify({ type: 'request-state', _src: 'monitor' }), { qos: 1 });
-  });
-
-  client.on('message', (t, payload) => {
+  es.addEventListener('message', e => {
     try {
-      const msg = JSON.parse(payload.toString());
+      const outer = JSON.parse(e.data);
+      const msg = JSON.parse(outer.message);
       if(msg._src === 'ctrl' && msg.type !== 'connect' && msg.type !== 'disconnect'){
         handleMonitorMessage(msg);
       }
     } catch(e) {}
   });
+
+  // Ask any already-connected controller to re-broadcast its state so a monitor
+  // that joins late (e.g. a second screen) syncs to the current values.
+  fetch(ntfyUrl, {
+    method: 'POST',
+    body: JSON.stringify({ type: 'request-state', _src: 'monitor' })
+  }).catch(() => {});
 }
 
 /* CONTROLLER SETUP */
@@ -477,6 +476,11 @@ function enableNoSleep(){
   if(noSleepEnabled) return;
   noSleepEnabled = true;
   noSleep.enable().catch(() => {});
+  if('mediaSession' in navigator){
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'Patient Monitor'
+    });
+  }
 }
 
 function buildSingleObsRow(o, container){
@@ -568,6 +572,8 @@ function formatVal(key, v){
   return Math.round(v);
 }
 
+const nudgeTimers = {};
+
 function nudge(key, delta){
   const nextValue = clampObsValue(key, ctrlState[key] + delta);
   ctrlState[key] = nextValue;
@@ -576,8 +582,11 @@ function nudge(key, delta){
     heldState[key] = nextValue;
     syncHoldIndicators();
   } else {
-    if(ctrlConn) ctrlConn.send({type:'obs', key, value: nextValue});
     flashInput(key);
+    clearTimeout(nudgeTimers[key]);
+    nudgeTimers[key] = setTimeout(() => {
+      if(ctrlConn) ctrlConn.send({type:'obs', key, value: ctrlState[key]});
+    }, 300);
   }
 }
 
@@ -734,68 +743,47 @@ function setupController(){
     ctrlStatusEl.className = 'ctrl-status ' + (ok === true ? 'ok' : ok === false ? 'err' : '');
   }
 
-  const topic = 'patient-monitor/' + roomId;
+  const ntfyUrl = NTFY_BASE + '/patient-monitor-' + roomId;
   setCtrlStatus('Connecting…');
 
-  const client = mqtt.connect(MQTT_BROKER, {
-    clientId: 'ctrl-' + Math.random().toString(36).slice(2, 10),
-    clean: true,
-    reconnectPeriod: 3000,
-  });
-
-  // Wrap the MQTT client in the same .send() interface used everywhere else.
-  // Changes made while disconnected are captured in ctrlState/ctrlRhythm/metricEnabled
-  // and re-sent by publishFullState() on every (re)connect.
   ctrlConn = {
     send(msg){
-      if(client.connected){
-        client.publish(topic, JSON.stringify({ ...msg, _src: 'ctrl' }), { qos: 1 });
-      }
+      fetch(ntfyUrl, {
+        method: 'POST',
+        body: JSON.stringify({ ...msg, _src: 'ctrl' })
+      }).then(r => {
+        if(r.ok) setCtrlStatus('Connected', true);
+        else setCtrlStatus('Send failed', false);
+      }).catch(() => setCtrlStatus('Connection error', false));
     }
   };
 
   function publishFullState(){
-    ctrlConn.send({ type: 'connect' });
-    ctrlConn.send({ type: 'rhythm', value: ctrlRhythm });
-    obsConfig.forEach(o => {
-      ctrlConn.send({ type: 'obs', key: o.key, value: ctrlState[o.key] });
-      ctrlConn.send({ type: 'metric', key: o.key, enabled: metricEnabled[o.key] });
+    ctrlConn.send({
+      type: 'fullstate',
+      rhythm: ctrlRhythm,
+      obs: Object.fromEntries(obsConfig.map(o => [o.key, ctrlState[o.key]])),
+      metrics: Object.fromEntries(obsConfig.map(o => [o.key, metricEnabled[o.key]]))
     });
   }
 
-  client.on('connect', () => {
-    setCtrlStatus('Connected', true);
-    // Listen for late-joining monitors asking for the current state.
-    client.subscribe(topic, { qos: 1 });
-    publishFullState();
-  });
-
-  // A monitor that opens after the controller is already running requests the
-  // current state; replay it so every monitor stays in sync.
-  client.on('message', (t, payload) => {
+  // Listen for monitors joining late and requesting the current state.
+  const ctrlEs = new EventSource(ntfyUrl + '/sse');
+  ctrlEs.addEventListener('message', e => {
     try {
-      const msg = JSON.parse(payload.toString());
+      const outer = JSON.parse(e.data);
+      const msg = JSON.parse(outer.message);
       if(msg._src === 'monitor' && msg.type === 'request-state'){
         publishFullState();
       }
     } catch(e) {}
   });
 
-  client.on('reconnect', () => {
-    setCtrlStatus('Reconnecting…');
-  });
-
-  client.on('close', () => {
-    setCtrlStatus('Disconnected', false);
-  });
-
-  client.on('error', () => {
-    setCtrlStatus('Connection error', false);
-  });
+  publishFullState();
 
   // Announce disconnect on page unload.
   window.addEventListener('pagehide', () => {
-    client.publish(topic, JSON.stringify({ type: 'disconnect', _src: 'ctrl' }), { qos: 0 });
+    navigator.sendBeacon(ntfyUrl, JSON.stringify({ type: 'disconnect', _src: 'ctrl' }));
   });
 }
 
