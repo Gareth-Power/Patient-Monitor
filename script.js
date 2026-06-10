@@ -45,6 +45,9 @@ let cur = {...initialMonitorState};
 let tgt = {...initialMonitorState};
 let rampEndTime = 0;
 const RAMP_DURATION = 10;
+// Tracks the NIBP target last applied so a change can be detected and the reading
+// snapped + flashed (NIBP is a discrete cuff measurement, not a trended value).
+const lastNibpTarget = { sbp: initialMonitorState.sbp, dbp: initialMonitorState.dbp };
 const metricEnabled = {
   hr: true,
   spo2: true,
@@ -53,6 +56,12 @@ const metricEnabled = {
   rr: true,
   temp: true
 };
+
+// Manually-triggered alarms, one flag per alarmable metric. When any is active
+// the monitor flashes that numeric and plays the Dräger-style alarm tone. Alarms
+// are never auto-set from values — they are toggled only from the controller.
+const ALARM_KEYS = ['hr', 'spo2', 'rr'];
+const alarmActive = { hr: false, spo2: false, rr: false };
 
 function lerp(a, b, f){ return a + (b - a) * f; }
 function clamp(v, min, max){ return Math.min(max, Math.max(min, v)); }
@@ -322,6 +331,23 @@ function updateNumerics(){
   const nibpEnabled = metricEnabled.sbp && metricEnabled.dbp;
   el('nibp', nibpEnabled ? (cur.sbp > 0 ? `${Math.round(cur.sbp)}/${Math.round(cur.dbp)}` : '---/---') : offValue);
   el('map', nibpEnabled && cur.sbp > 0 ? `MAP ${Math.round((cur.sbp + 2 * cur.dbp) / 3)}` : '');
+
+  // An alarming metric flashes its numeric card (only while its metric is on).
+  ALARM_KEYS.forEach(key => {
+    const valueEl = document.getElementById(key);
+    const card = valueEl ? valueEl.closest('.num-card') : null;
+    if(card) card.classList.toggle('num-alarm', alarmActive[key] && metricEnabled[key]);
+  });
+}
+
+// Blink the NIBP numeric three times to acknowledge a fresh cuff reading.
+function flashNibpReading(){
+  const el = document.getElementById('nibp');
+  if(!el) return;
+  el.classList.remove('nibp-reading');
+  void el.offsetWidth; // restart the animation if it is already running
+  el.classList.add('nibp-reading');
+  el.addEventListener('animationend', () => el.classList.remove('nibp-reading'), { once: true });
 }
 
 function monitorFrame(ts){
@@ -335,8 +361,16 @@ function monitorFrame(ts){
   cur.hr = smoothValue(cur.hr, tgt.hr, rampSpeed ?? 3.8, dt);
   cur.spo2 = smoothValue(cur.spo2, tgt.spo2, rampSpeed ?? 2.2, dt);
   cur.rr = smoothValue(cur.rr, tgt.rr, rampSpeed ?? 3.2, dt);
-  cur.sbp = smoothValue(cur.sbp, tgt.sbp, rampSpeed ?? 2.4, dt);
-  cur.dbp = smoothValue(cur.dbp, tgt.dbp, rampSpeed ?? 2.4, dt);
+  // NIBP is a discrete cuff reading, not a continuously trended value: it snaps
+  // straight to the new target instead of easing like the others, and the
+  // numeric flashes to acknowledge the fresh reading.
+  if(tgt.sbp !== lastNibpTarget.sbp || tgt.dbp !== lastNibpTarget.dbp){
+    cur.sbp = tgt.sbp;
+    cur.dbp = tgt.dbp;
+    lastNibpTarget.sbp = tgt.sbp;
+    lastNibpTarget.dbp = tgt.dbp;
+    flashNibpReading();
+  }
   cur.temp = smoothValue(cur.temp, tgt.temp, rampSpeed ?? 0.8, dt);
   cur.rhythm = tgt.rhythm;
   updateNumerics();
@@ -358,7 +392,6 @@ function monitorFrame(ts){
     });
   }
   waveStates.forEach(drawWave);
-  updateBeep();
   requestAnimationFrame(monitorFrame);
 }
 
@@ -372,9 +405,6 @@ let audioCtx = null;
 // Sound is off until the user explicitly turns it on via the Beep button. That
 // press also serves as the user gesture browsers require to unlock audio.
 let beepOn = false;
-// Phase (0..1 within one cardiac cycle) at which the R-peak occurs. Crossing
-// this fraction between frames is what fires a beep.
-let lastBeepPhase = 0;
 
 function ensureAudio(){
   if(audioCtx) return audioCtx;
@@ -416,28 +446,26 @@ function playBeep(){
   osc.stop(now + dur + 0.01);
 }
 
-// Fire a beep when the ECG sweep crosses the R-peak this frame. VF has no
-// organized beat, so no beep; a flat/absent HR or a disabled HR metric is silent.
-function updateBeep(){
-  if(!metricEnabled.hr || cur.rhythm === 'VF' || getEffectivePulseRate(cur) <= 0){
-    lastBeepPhase = ecgPhase;
-    return;
-  }
-  let rPeakPhase;
-  if(cur.rhythm === 'VT'){
-    // VT's triangle peak sits at the start of each cycle.
-    rPeakPhase = 0;
-  } else {
-    const { rrSec, prInterval, qrsDur } = getEcgIntervals(Math.max(cur.hr, 1));
-    rPeakPhase = (prInterval + qrsDur * 0.32) / rrSec;
-  }
-  // Detect the phase wrapping past rPeakPhase since the previous frame, handling
-  // the 1->0 wrap of the cyclic phase.
-  const crossed = lastBeepPhase <= ecgPhase
-    ? (lastBeepPhase < rPeakPhase && ecgPhase >= rPeakPhase)
-    : (lastBeepPhase < rPeakPhase || ecgPhase >= rPeakPhase);
-  if(crossed) playBeep();
-  lastBeepPhase = ecgPhase;
+// The QRS beep is driven by a self-rescheduling timer rather than the animation
+// loop, because browsers suspend requestAnimationFrame in background tabs (which
+// would silence the beep there). A timer keeps firing — throttled but alive — so
+// the beep behaves like the alarm and continues off-tab. The interval is the
+// current R-R period, recomputed each beat so it tracks live HR changes.
+let beepTimer = null;
+
+function beepCanSound(){
+  return beepOn && metricEnabled.hr && cur.rhythm !== 'VF' && getEffectivePulseRate(cur) > 0;
+}
+
+function scheduleNextBeep(){
+  const rate = getEffectivePulseRate(cur);
+  // Guard against zero/unsound state; re-check shortly until a valid beat exists.
+  const intervalMs = (beepCanSound() && rate > 0) ? (60000 / rate) : 250;
+  beepTimer = setTimeout(() => {
+    if(beepCanSound()) playBeep();
+    if(beepOn) scheduleNextBeep();
+    else beepTimer = null;
+  }, intervalMs);
 }
 
 function setBeepOn(on){
@@ -448,6 +476,77 @@ function setBeepOn(on){
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.setAttribute('aria-label', on ? 'Turn beep off' : 'Turn beep on');
   }
+  if(on){
+    if(!beepTimer){
+      if(beepCanSound()) playBeep();
+      scheduleNextBeep();
+    }
+  } else if(beepTimer){
+    clearTimeout(beepTimer);
+    beepTimer = null;
+  }
+}
+
+/* ALARM TONE
+   Dräger monitors use the IEC 60601-1-8 medium-priority pattern: a burst of three
+   short pulses, repeated on a cycle while the alarm condition stands. We schedule
+   the pulses on the Web Audio clock for tight timing and loop the burst with a
+   timer for as long as any metric alarm is active. */
+let alarmTimer = null;
+// Pulse onset times (s) within one burst and their pitches — the rising/falling
+// melodic shape characteristic of the medium-priority alarm.
+const ALARM_BURST = [
+  { at: 0.00, freq: 988 },  // B5
+  { at: 0.20, freq: 988 },
+  { at: 0.40, freq: 988 },
+];
+const ALARM_PULSE_DUR = 0.15;
+const ALARM_BURST_PERIOD = 1400; // ms between bursts
+
+function playAlarmPulse(ctx, startAt, freq){
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  // A square wave gives the hard, attention-demanding timbre of a clinical alarm.
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  const peak = 0.14;
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peak, startAt + 0.008);
+  gain.gain.setValueAtTime(peak, startAt + ALARM_PULSE_DUR - 0.03);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + ALARM_PULSE_DUR);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + ALARM_PULSE_DUR + 0.01);
+}
+
+function playAlarmBurst(){
+  const ctx = ensureAudio();
+  if(!ctx || ctx.state === 'suspended') return;
+  const base = ctx.currentTime + 0.02;
+  ALARM_BURST.forEach(p => playAlarmPulse(ctx, base + p.at, p.freq));
+}
+
+function anyAlarmActive(){
+  // Only metrics that are switched on can alarm audibly/visually.
+  return ALARM_KEYS.some(k => alarmActive[k] && metricEnabled[k]);
+}
+
+// Start/stop the looping alarm to match the current alarm state.
+function refreshAlarmTone(){
+  const shouldPlay = anyAlarmActive();
+  if(shouldPlay && !alarmTimer){
+    playAlarmBurst();
+    alarmTimer = setInterval(playAlarmBurst, ALARM_BURST_PERIOD);
+  } else if(!shouldPlay && alarmTimer){
+    clearInterval(alarmTimer);
+    alarmTimer = null;
+  }
+}
+
+function setAlarm(key, active){
+  if(!(key in alarmActive)) return;
+  alarmActive[key] = !!active;
+  refreshAlarmTone();
 }
 
 /* MONITOR PEER SETUP */
@@ -470,10 +569,19 @@ function handleMonitorMessage(msg){
     getMetricGroupKeys(msg.key).forEach(k => {
       metricEnabled[k] = !!msg.enabled;
     });
+    refreshAlarmTone();
+  } else if(msg.type === 'alarm'){
+    setAlarm(msg.key, msg.active);
   } else if(msg.type === 'fullstate'){
     tgt.rhythm = msg.rhythm;
     Object.keys(msg.obs).forEach(k => { tgt[k] = clampObsValue(k, msg.obs[k]); });
     Object.keys(msg.metrics).forEach(k => { metricEnabled[k] = !!msg.metrics[k]; });
+    if(msg.alarms){
+      Object.keys(msg.alarms).forEach(k => {
+        if(k in alarmActive) alarmActive[k] = !!msg.alarms[k];
+      });
+    }
+    refreshAlarmTone();
   }
 }
 
@@ -487,7 +595,6 @@ function setupBeepControls(){
       if(!beepOn){
         const ctx = ensureAudio();
         if(ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
-        lastBeepPhase = ecgPhase;
       }
       setBeepOn(!beepOn);
     });
@@ -541,6 +648,8 @@ let ctrlState = {
   hr:72, spo2:98, rr:16, temp:36.7, sbp:120, dbp:80
 };
 let ctrlRhythm = 'NSR';
+// Controller-side mirror of the manual alarm flags.
+const ctrlAlarm = { hr: false, spo2: false, rr: false };
 let holdActive = false;
 let heldState = null;
 // Staged rhythm while Hold is active; null means no rhythm change is queued.
@@ -596,13 +705,20 @@ function buildSingleObsRow(o, container){
   row.className = 'obs-row';
   row.dataset.key = o.key;
   const val = formatVal(o.key, ctrlState[o.key]);
+  const alarmable = ALARM_KEYS.includes(o.key);
+  const alarmBtn = alarmable
+    ? `<button class="obs-alarm ${ctrlAlarm[o.key] ? 'on' : ''}" type="button" data-action="alarm" data-key="${o.key}" aria-pressed="${ctrlAlarm[o.key] ? 'true' : 'false'}">Alarm</button>`
+    : '';
   row.innerHTML = `
     <div class="obs-head">
       <div class="obs-meta">
         <div class="obs-name">${o.label}</div>
         <div class="obs-unit">${o.unit}</div>
       </div>
-      <button class="obs-toggle ${metricEnabled[o.key] ? 'on' : 'off'}" type="button" data-action="toggle" data-key="${o.key}">${metricEnabled[o.key] ? 'On' : 'Off'}</button>
+      <div class="obs-head-btns">
+        ${alarmBtn}
+        <button class="obs-toggle ${metricEnabled[o.key] ? 'on' : 'off'}" type="button" data-action="toggle" data-key="${o.key}">${metricEnabled[o.key] ? 'On' : 'Off'}</button>
+      </div>
     </div>
     <div class="obs-controls">
       <button class="obs-btn" type="button" data-action="decrease" data-key="${o.key}">-</button>
@@ -612,6 +728,9 @@ function buildSingleObsRow(o, container){
   row.querySelector('[data-action="decrease"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, -o.step); });
   row.querySelector('[data-action="increase"]').addEventListener('click', () => { enableNoSleep(); nudge(o.key, o.step); });
   row.querySelector('[data-action="toggle"]').addEventListener('click', () => { enableNoSleep(); toggleMetric(o.key); });
+  if(alarmable){
+    row.querySelector('[data-action="alarm"]').addEventListener('click', () => { enableNoSleep(); toggleAlarm(o.key); });
+  }
   const input = row.querySelector('.obs-input');
   input.addEventListener('change', () => applyManualInput(o.key, input.value));
   input.addEventListener('blur', () => applyManualInput(o.key, input.value));
@@ -740,6 +859,15 @@ function syncMetricControls(key){
     toggleBtn.textContent = enabled ? 'On' : 'Off';
     toggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
   }
+
+  // An alarm only makes sense while its observation is on. When the observation
+  // is switched off, clear any active alarm and disable the button until it
+  // comes back on.
+  const alarmBtn = document.querySelector(`.obs-alarm[data-key="${key}"]`);
+  if(alarmBtn){
+    if(!enabled && ctrlAlarm[key]) toggleAlarm(key);
+    alarmBtn.disabled = !enabled;
+  }
 }
 
 function toggleMetric(key){
@@ -750,6 +878,18 @@ function toggleMetric(key){
     syncMetricControls(k);
     if(ctrlConn) ctrlConn.send({type:'metric', key: k, enabled: nextEnabled});
   });
+}
+
+function toggleAlarm(key){
+  if(!(key in ctrlAlarm)) return;
+  const next = !ctrlAlarm[key];
+  ctrlAlarm[key] = next;
+  const btn = document.querySelector(`.obs-alarm[data-key="${key}"]`);
+  if(btn){
+    btn.classList.toggle('on', next);
+    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
+  }
+  if(ctrlConn) ctrlConn.send({type:'alarm', key, active: next});
 }
 
 function flashInput(key){
@@ -871,7 +1011,8 @@ function setupController(){
       type: 'fullstate',
       rhythm: ctrlRhythm,
       obs: Object.fromEntries(obsConfig.map(o => [o.key, ctrlState[o.key]])),
-      metrics: Object.fromEntries(obsConfig.map(o => [o.key, metricEnabled[o.key]]))
+      metrics: Object.fromEntries(obsConfig.map(o => [o.key, metricEnabled[o.key]])),
+      alarms: { ...ctrlAlarm }
     });
   }
 
