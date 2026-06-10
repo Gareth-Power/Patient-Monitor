@@ -100,6 +100,13 @@ body {
   right: 21px;
   bottom: 20px;
   z-index: 2;
+  display: flex;
+  gap: 8px;
+}
+
+#beepBtn.beep-on {
+  background: #dcfce7;
+  border-color: #86efac;
 }
 
 /* 16:9 sizing box. Owns the visible area; the grid below renders into a fixed

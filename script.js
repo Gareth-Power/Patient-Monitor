@@ -358,7 +358,96 @@ function monitorFrame(ts){
     });
   }
   waveStates.forEach(drawWave);
+  updateBeep();
   requestAnimationFrame(monitorFrame);
+}
+
+/* AUDIO / BEEP ENGINE
+   Real bedside monitors emit one short "QRS beep" per heartbeat, fired at the
+   R-wave, and lower the beep's pitch as SpO2 falls — an audible desaturation
+   cue clinicians rely on without looking at the screen. We reproduce both:
+   the beep is triggered when the ECG sweep phase crosses the R-peak, and its
+   frequency is mapped from the current SpO2. */
+let audioCtx = null;
+// Sound is off until the user explicitly turns it on via the Beep button. That
+// press also serves as the user gesture browsers require to unlock audio.
+let beepOn = false;
+// Phase (0..1 within one cardiac cycle) at which the R-peak occurs. Crossing
+// this fraction between frames is what fires a beep.
+let lastBeepPhase = 0;
+
+function ensureAudio(){
+  if(audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if(!AC) return null;
+  audioCtx = new AC();
+  return audioCtx;
+}
+
+// SpO2 -> beep frequency. Healthy sats sit near 880 Hz; the tone drops roughly a
+// semitone per percentage point below ~96% so a desaturation is clearly audible.
+function beepFrequency(spo2){
+  if(spo2 >= 96) return 880;
+  const drop = clamp(96 - spo2, 0, 40);
+  return clamp(880 * Math.pow(2, -drop / 12), 180, 880);
+}
+
+function playBeep(){
+  if(!beepOn) return;
+  const ctx = ensureAudio();
+  if(!ctx || ctx.state === 'suspended') return;
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  // Square-ish tone via a triangle wave gives the brighter, harder edge of a real
+  // monitor beep rather than the soft "bop" of a pure sine.
+  osc.type = 'triangle';
+  osc.frequency.value = beepFrequency(cur.spo2);
+  // Crisp beep: near-instant attack, a short sustained body, then a quick release.
+  // The flat top (vs. an immediate decay) is what reads as a "beep" not a "bop".
+  const peak = 0.16;
+  const dur = 0.12;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(peak, now + 0.002);
+  gain.gain.setValueAtTime(peak, now + dur - 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + dur + 0.01);
+}
+
+// Fire a beep when the ECG sweep crosses the R-peak this frame. VF has no
+// organized beat, so no beep; a flat/absent HR or a disabled HR metric is silent.
+function updateBeep(){
+  if(!metricEnabled.hr || cur.rhythm === 'VF' || getEffectivePulseRate(cur) <= 0){
+    lastBeepPhase = ecgPhase;
+    return;
+  }
+  let rPeakPhase;
+  if(cur.rhythm === 'VT'){
+    // VT's triangle peak sits at the start of each cycle.
+    rPeakPhase = 0;
+  } else {
+    const { rrSec, prInterval, qrsDur } = getEcgIntervals(Math.max(cur.hr, 1));
+    rPeakPhase = (prInterval + qrsDur * 0.32) / rrSec;
+  }
+  // Detect the phase wrapping past rPeakPhase since the previous frame, handling
+  // the 1->0 wrap of the cyclic phase.
+  const crossed = lastBeepPhase <= ecgPhase
+    ? (lastBeepPhase < rPeakPhase && ecgPhase >= rPeakPhase)
+    : (lastBeepPhase < rPeakPhase || ecgPhase >= rPeakPhase);
+  if(crossed) playBeep();
+  lastBeepPhase = ecgPhase;
+}
+
+function setBeepOn(on){
+  beepOn = on;
+  const btn = document.getElementById('beepBtn');
+  if(btn){
+    btn.classList.toggle('beep-on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.setAttribute('aria-label', on ? 'Turn beep off' : 'Turn beep on');
+  }
 }
 
 /* MONITOR PEER SETUP */
@@ -388,11 +477,30 @@ function handleMonitorMessage(msg){
   }
 }
 
+function setupBeepControls(){
+  const btn = document.getElementById('beepBtn');
+  if(btn){
+    btn.addEventListener('click', () => {
+      // The click is a user gesture, so use it to start the wake-lock too.
+      enableNoSleep();
+      // The same gesture lets us create/resume the AudioContext when turning on.
+      if(!beepOn){
+        const ctx = ensureAudio();
+        if(ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+        lastBeepPhase = ecgPhase;
+      }
+      setBeepOn(!beepOn);
+    });
+  }
+  setBeepOn(beepOn);
+}
+
 function setupMonitor(){
   document.getElementById('monitorView').style.display = 'flex';
   resizeWaveDisplays();
   requestAnimationFrame(monitorFrame);
   enableNoSleep();
+  setupBeepControls();
 
   const ntfyUrl = NTFY_BASE + '/patient-monitor-' + roomId;
 
