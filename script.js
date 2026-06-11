@@ -1046,14 +1046,44 @@ const fsBtn = document.getElementById('fsBtn');
 const monitorStage = document.querySelector('.monitor-stage');
 
 if(fsBtn && monitorStage){
+  // iPhone Safari has no element Fullscreen API (only <video> can go fullscreen),
+  // so requestFullscreen is undefined there. Everywhere else (iPad, Android, desktop)
+  // we use the real API exactly as before; iPhone falls back to a CSS pseudo-fullscreen.
+  const realFullscreenSupported = typeof monitorStage.requestFullscreen === 'function';
+
+  function exitFauxFullscreen(){
+    monitorStage.classList.remove('faux-fullscreen');
+    document.removeEventListener('keydown', onFauxKey);
+    fsBtn.textContent = 'Fullscreen';
+    fitMonitorGrid();
+  }
+  function onFauxKey(e){
+    if(e.key === 'Escape') exitFauxFullscreen();
+  }
+  function enterFauxFullscreen(){
+    monitorStage.classList.add('faux-fullscreen');
+    document.addEventListener('keydown', onFauxKey);
+    fsBtn.textContent = 'Exit';
+    fitMonitorGrid();
+  }
+
   fsBtn.addEventListener('click', async () => {
     enableNoSleep();
-    try {
-      if(!document.fullscreenElement && monitorStage.requestFullscreen){
-        await monitorStage.requestFullscreen();
+    if(realFullscreenSupported){
+      try {
+        if(!document.fullscreenElement){
+          await monitorStage.requestFullscreen();
+        }
+      } catch (err) {
+        console.warn('Fullscreen toggle failed', err);
       }
-    } catch (err) {
-      console.warn('Fullscreen toggle failed', err);
+      return;
+    }
+    // Fallback path (iPhone Safari): toggle the CSS pseudo-fullscreen.
+    if(monitorStage.classList.contains('faux-fullscreen')){
+      exitFauxFullscreen();
+    } else {
+      enterFauxFullscreen();
     }
   });
 }
