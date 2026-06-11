@@ -786,12 +786,11 @@ function buildNibpRow(container){
 function buildObsRows(){
   const container = document.getElementById('obsRows');
   container.innerHTML = '';
-  // HR, SpO2
-  obsConfigRows.slice(0, 2).forEach(o => buildSingleObsRow(o, container));
-  // Combined NIBP row
+  // HR, SpO2, RR, Temp
+  obsConfigRows.forEach(o => buildSingleObsRow(o, container));
+  // Combined NIBP row last, so its taller layout doesn't sit beside the
+  // smaller boxes and affect their row height.
   buildNibpRow(container);
-  // RR, Temp
-  obsConfigRows.slice(2).forEach(o => buildSingleObsRow(o, container));
 }
 
 function formatVal(key, v){
