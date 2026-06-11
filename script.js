@@ -624,11 +624,31 @@ function setupMonitor(){
 
   const es = new EventSource(ntfyUrl + '/sse');
 
+  // The monitor is the source of truth for the room: it accumulates every change
+  // and answers state requests, so a controller that joins, rejoins, or takes over
+  // can sync to the current live values instead of resetting them to defaults.
+  function monitorPublishFullState(){
+    fetch(ntfyUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'fullstate',
+        _src: 'monitor',
+        rhythm: tgt.rhythm,
+        obs: Object.fromEntries(obsConfig.map(o => [o.key, tgt[o.key]])),
+        metrics: { ...metricEnabled },
+        alarms: { ...alarmActive }
+      })
+    }).catch(() => {});
+  }
+
   es.addEventListener('message', e => {
     try {
       const outer = JSON.parse(e.data);
       const msg = JSON.parse(outer.message);
-      if(msg._src === 'ctrl' && msg.type !== 'connect' && msg.type !== 'disconnect'){
+      if(msg._src !== 'ctrl') return;
+      if(msg.type === 'request-state'){
+        monitorPublishFullState();
+      } else if(msg.type !== 'connect' && msg.type !== 'disconnect'){
         handleMonitorMessage(msg);
       }
     } catch(e) {}
@@ -1015,19 +1035,61 @@ function setupController(){
     });
   }
 
-  // Listen for monitors joining late and requesting the current state.
+  // Adopt the monitor's full state into this controller and re-render its widgets,
+  // so a controller that joins, rejoins, or takes over reflects the live values.
+  function adoptFullState(msg){
+    if(msg.rhythm !== undefined){
+      ctrlRhythm = msg.rhythm;
+      const sel = document.getElementById('rhythmSelect');
+      if(sel) sel.value = ctrlRhythm;
+    }
+    if(msg.obs){
+      Object.keys(msg.obs).forEach(k => {
+        if(k in ctrlState) ctrlState[k] = clampObsValue(k, msg.obs[k]);
+      });
+    }
+    if(msg.metrics){
+      Object.keys(msg.metrics).forEach(k => {
+        if(k in metricEnabled) metricEnabled[k] = !!msg.metrics[k];
+      });
+    }
+    if(msg.alarms){
+      Object.keys(msg.alarms).forEach(k => {
+        if(k in ctrlAlarm) ctrlAlarm[k] = !!msg.alarms[k];
+      });
+    }
+    buildObsRows();
+  }
+
+  // On join, pull current state from the monitor (the source of truth) rather than
+  // asserting our defaults. We still answer a late-joining monitor's request.
+  let stateAdopted = false;
+  let seedTimer = null;
   const ctrlEs = new EventSource(ntfyUrl + '/sse');
   ctrlEs.addEventListener('message', e => {
     try {
       const outer = JSON.parse(e.data);
       const msg = JSON.parse(outer.message);
-      if(msg._src === 'monitor' && msg.type === 'request-state'){
+      if(msg._src !== 'monitor') return;
+      if(msg.type === 'request-state'){
         publishFullState();
+      } else if(msg.type === 'fullstate' && !stateAdopted){
+        stateAdopted = true;
+        clearTimeout(seedTimer);
+        adoptFullState(msg);
       }
     } catch(e) {}
   });
 
-  publishFullState();
+  ctrlConn.send({ type: 'request-state' });
+
+  // Fallback: if no monitor answers (a truly empty room), seed it with our state.
+  seedTimer = setTimeout(() => {
+    if(!stateAdopted){
+      stateAdopted = true;
+      publishFullState();
+    }
+  }, 1500);
 
   // Announce disconnect on page unload.
   window.addEventListener('pagehide', () => {
